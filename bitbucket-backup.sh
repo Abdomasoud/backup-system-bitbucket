@@ -4,6 +4,15 @@
 
 set -e
 
+# Load environment variables from config file if it exists
+if [[ -f "${BACKUP_BASE_DIR}/config/.env" ]]; then
+    source "${BACKUP_BASE_DIR}/config/.env"
+    log_info "Loaded environment variables from config/.env"
+elif [[ -f "$(dirname "$0")/../config/.env" ]]; then
+    source "$(dirname "$0")/../config/.env"
+    log_info "Loaded environment variables from ../config/.env"
+fi
+
 # Configuration - Edit these values or set as environment variables
 ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
 BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"

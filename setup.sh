@@ -178,11 +178,15 @@ install_dependencies() {
 copy_backup_scripts() {
     log_info "Copying backup scripts..."
     
-    # Get the directory where the setup script is located (where the backup files are)
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # Get the ACTUAL directory where setup.sh is being run from
+    local script_dir="$PWD"
     
-    log_info "Script directory: $script_dir"
+    log_info "Current working directory: $script_dir"
     log_info "Looking for files in: $script_dir"
+    
+    # List what's actually in the current directory
+    log_info "Files in current directory:"
+    ls -la "$script_dir"
     
     # Check if files exist before copying
     local files_to_copy=(
@@ -196,12 +200,11 @@ copy_backup_scripts() {
             log_info "Found: $file"
         else
             log_error "Missing: $file in $script_dir"
-            ls -la "$script_dir"
             exit 1
         fi
     done
     
-    # Copy the backup scripts
+    # Copy the backup scripts from current directory to backup directory
     cp "$script_dir/bitbucket-backup.py" "$BACKUP_DIR/scripts/"
     cp "$script_dir/bitbucket-backup.sh" "$BACKUP_DIR/scripts/"
     cp "$script_dir/.env.example" "$BACKUP_DIR/config/"
