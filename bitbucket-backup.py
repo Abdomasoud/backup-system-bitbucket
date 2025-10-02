@@ -122,9 +122,9 @@ class BitbucketMetadataBackup:
         return repos
     
     def backup_repository_metadata(self, repo):
-        """Backup metadata for a single repository"""
+        """Backup comprehensive metadata for a single repository"""
         repo_name = repo['name']
-        self.log(f"📝 Backing up metadata for {repo_name}...")
+        self.log(f"📝 Backing up comprehensive metadata for {repo_name}...")
         
         # Create repo-specific metadata directory
         repo_metadata_dir = os.path.join(self.metadata_dir, repo_name, self.timestamp)
@@ -132,7 +132,8 @@ class BitbucketMetadataBackup:
         
         metadata = {
             'repository_info': repo,
-            'backup_timestamp': self.timestamp
+            'backup_timestamp': self.timestamp,
+            'backup_type': 'comprehensive'
         }
         
         # Fetch pull requests
@@ -176,12 +177,269 @@ class BitbucketMetadataBackup:
             self.log(f"Error fetching tags for {repo_name}: {e}")
             metadata['tags'] = []
         
+        # Fetch repository permissions
+        try:
+            permissions = self.fetch_repository_permissions(repo_name)
+            metadata['permissions'] = permissions
+            metadata['total_permissions'] = len(permissions)
+            self.log(f"  - Fetched {len(permissions)} permission entries")
+        except Exception as e:
+            self.log(f"Error fetching permissions for {repo_name}: {e}")
+            metadata['permissions'] = []
+        
+        # Fetch repository wiki (if exists)
+        try:
+            wiki_data = self.fetch_repository_wiki(repo_name)
+            metadata['wiki'] = wiki_data
+            metadata['wiki_pages_count'] = len(wiki_data.get('pages', [])) if wiki_data else 0
+            self.log(f"  - Fetched wiki with {metadata['wiki_pages_count']} pages")
+        except Exception as e:
+            self.log(f"Error fetching wiki for {repo_name}: {e}")
+            metadata['wiki'] = None
+        
+        # Fetch repository settings and configuration
+        try:
+            repo_settings = self.fetch_repository_settings(repo_name)
+            metadata['repository_settings'] = repo_settings
+            self.log(f"  - Fetched repository settings and configuration")
+        except Exception as e:
+            self.log(f"Error fetching settings for {repo_name}: {e}")
+            metadata['repository_settings'] = {}
+        
+        # Fetch branch permissions/restrictions
+        try:
+            branch_restrictions = self.fetch_branch_restrictions(repo_name)
+            metadata['branch_restrictions'] = branch_restrictions
+            metadata['total_branch_restrictions'] = len(branch_restrictions)
+            self.log(f"  - Fetched {len(branch_restrictions)} branch restrictions")
+        except Exception as e:
+            self.log(f"Error fetching branch restrictions for {repo_name}: {e}")
+            metadata['branch_restrictions'] = []
+        
+        # Fetch webhooks
+        try:
+            webhooks = self.fetch_repository_webhooks(repo_name)
+            metadata['webhooks'] = webhooks
+            metadata['total_webhooks'] = len(webhooks)
+            self.log(f"  - Fetched {len(webhooks)} webhooks")
+        except Exception as e:
+            self.log(f"Error fetching webhooks for {repo_name}: {e}")
+            metadata['webhooks'] = []
+        
+        # Fetch deploy keys
+        try:
+            deploy_keys = self.fetch_deploy_keys(repo_name)
+            metadata['deploy_keys'] = deploy_keys
+            metadata['total_deploy_keys'] = len(deploy_keys)
+            self.log(f"  - Fetched {len(deploy_keys)} deploy keys")
+        except Exception as e:
+            self.log(f"Error fetching deploy keys for {repo_name}: {e}")
+            metadata['deploy_keys'] = []
+        
         # Save metadata to JSON file
         metadata_file = os.path.join(repo_metadata_dir, 'metadata.json')
         with open(metadata_file, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, default=str)
         
         return metadata_file
+    
+    def fetch_repository_permissions(self, repo_name):
+        """Fetch repository access permissions"""
+        permissions_data = []
+        
+        # Fetch repository privileges (user/team permissions)
+        try:
+            # Get repository privileges
+            privileges = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/permissions-config/users')
+            for privilege in privileges:
+                permissions_data.append({
+                    'type': 'user_permission',
+                    'user': privilege.get('user', {}),
+                    'permission': privilege.get('permission', ''),
+                    'type_detail': 'repository_access'
+                })
+            
+            # Get team permissions
+            team_privileges = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/permissions-config/teams')
+            for privilege in team_privileges:
+                permissions_data.append({
+                    'type': 'team_permission',
+                    'team': privilege.get('team', {}),
+                    'permission': privilege.get('permission', ''),
+                    'type_detail': 'repository_access'
+                })
+                
+        except Exception as e:
+            self.log(f"Warning: Could not fetch detailed permissions: {e}")
+            
+        return permissions_data
+    
+    def fetch_repository_wiki(self, repo_name):
+        """Fetch repository wiki content"""
+        try:
+            # Check if wiki exists and is enabled
+            wiki_info = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}')
+            
+            if not wiki_info or not wiki_info.get('has_wiki', False):
+                return None
+            
+            wiki_data = {
+                'enabled': True,
+                'pages': [],
+                'wiki_info': {}
+            }
+            
+            # Try to get wiki pages (this endpoint might not be available for all repos)
+            try:
+                wiki_pages = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/wiki')
+                
+                for page in wiki_pages:
+                    page_data = {
+                        'title': page.get('title', ''),
+                        'slug': page.get('slug', ''),
+                        'content': page.get('content', ''),
+                        'created_on': page.get('created_on', ''),
+                        'updated_on': page.get('updated_on', ''),
+                        'author': page.get('author', {})
+                    }
+                    wiki_data['pages'].append(page_data)
+                    
+            except Exception as e:
+                # Wiki API might not be accessible or wiki might be empty
+                self.log(f"Wiki exists but content not accessible via API: {e}")
+                wiki_data['pages'] = []
+                wiki_data['note'] = 'Wiki exists but content not accessible via API'
+            
+            return wiki_data
+            
+        except Exception as e:
+            self.log(f"Error checking wiki status: {e}")
+            return None
+    
+    def fetch_repository_settings(self, repo_name):
+        """Fetch comprehensive repository settings"""
+        settings = {}
+        
+        try:
+            # Get main repository info (includes many settings)
+            repo_info = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}')
+            if repo_info:
+                settings.update({
+                    'is_private': repo_info.get('is_private', False),
+                    'has_issues': repo_info.get('has_issues', False),
+                    'has_wiki': repo_info.get('has_wiki', False),
+                    'fork_policy': repo_info.get('fork_policy', ''),
+                    'language': repo_info.get('language', ''),
+                    'description': repo_info.get('description', ''),
+                    'website': repo_info.get('website', ''),
+                    'mainbranch': repo_info.get('mainbranch', {}),
+                    'size': repo_info.get('size', 0),
+                    'project': repo_info.get('project', {}),
+                    'clone_links': repo_info.get('links', {}).get('clone', [])
+                })
+            
+            # Get repository configuration
+            try:
+                repo_config = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}/src/HEAD/.gitignore')
+                if repo_config:
+                    settings['gitignore_exists'] = True
+                else:
+                    settings['gitignore_exists'] = False
+            except:
+                settings['gitignore_exists'] = False
+            
+            # Try to get branch model (Git Flow settings)
+            try:
+                branch_model = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}/branching-model')
+                settings['branch_model'] = branch_model
+            except:
+                settings['branch_model'] = None
+                
+        except Exception as e:
+            self.log(f"Error fetching repository settings: {e}")
+        
+        return settings
+    
+    def fetch_branch_restrictions(self, repo_name):
+        """Fetch branch permissions and restrictions"""
+        try:
+            restrictions = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/branch-restrictions')
+            
+            # Process and clean up restrictions data
+            processed_restrictions = []
+            for restriction in restrictions:
+                processed_restriction = {
+                    'id': restriction.get('id'),
+                    'kind': restriction.get('kind', ''),
+                    'pattern': restriction.get('pattern', ''),
+                    'users': restriction.get('users', []),
+                    'groups': restriction.get('groups', []),
+                    'type': restriction.get('type', ''),
+                    'value': restriction.get('value'),
+                    'branch_match_kind': restriction.get('branch_match_kind', ''),
+                    'branch_type': restriction.get('branch_type', '')
+                }
+                processed_restrictions.append(processed_restriction)
+            
+            return processed_restrictions
+            
+        except Exception as e:
+            self.log(f"Error fetching branch restrictions: {e}")
+            return []
+    
+    def fetch_repository_webhooks(self, repo_name):
+        """Fetch repository webhooks"""
+        try:
+            webhooks = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/hooks')
+            
+            # Process webhook data (remove sensitive info like secrets)
+            processed_webhooks = []
+            for webhook in webhooks:
+                processed_webhook = {
+                    'uuid': webhook.get('uuid', ''),
+                    'url': webhook.get('url', ''),
+                    'description': webhook.get('description', ''),
+                    'subject_type': webhook.get('subject_type', ''),
+                    'events': webhook.get('events', []),
+                    'active': webhook.get('active', False),
+                    'created_at': webhook.get('created_at', ''),
+                    'updated_at': webhook.get('updated_at', '')
+                    # Note: We intentionally omit webhook secrets for security
+                }
+                processed_webhooks.append(processed_webhook)
+            
+            return processed_webhooks
+            
+        except Exception as e:
+            self.log(f"Error fetching webhooks: {e}")
+            return []
+    
+    def fetch_deploy_keys(self, repo_name):
+        """Fetch repository deploy keys"""
+        try:
+            deploy_keys = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/deploy-keys')
+            
+            # Process deploy keys (remove private key data for security)
+            processed_keys = []
+            for key in deploy_keys:
+                processed_key = {
+                    'id': key.get('id'),
+                    'key': key.get('key', '')[:50] + '...' if key.get('key') else '',  # Truncate for security
+                    'label': key.get('label', ''),
+                    'type': key.get('type', ''),
+                    'created_on': key.get('created_on', ''),
+                    'repository': key.get('repository', {}),
+                    'owner': key.get('owner', {}),
+                    'comment': key.get('comment', ''),
+                    'last_used': key.get('last_used', '')
+                }
+                processed_keys.append(processed_key)
+            
+            return processed_keys
+            
+        except Exception as e:
+            self.log(f"Error fetching deploy keys: {e}")
+            return []
     
     def clone_repository(self, repo):
         """Clone repository to local storage"""
