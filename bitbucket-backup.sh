@@ -46,6 +46,7 @@ init_config() {
     # Set configuration with loaded values or defaults
     ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
     BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"
+    BITBUCKET_USERNAME="${BITBUCKET_USERNAME:-your-bitbucket-username}"
     BITBUCKET_WORKSPACE="${BITBUCKET_WORKSPACE:-your-source-workspace}"
     BACKUP_WORKSPACE="${BACKUP_WORKSPACE:-your-backup-workspace}"
     
@@ -196,9 +197,34 @@ setup_directories() {
 run_backup() {
     log_info "🚀 Starting full backup process..."
     
-    # Run Python backup script (no venv needed)
+    # Setup directory structure first
+    setup_directories
+    
+    # Export all environment variables so Python can access them
+    export ATLASSIAN_EMAIL="$ATLASSIAN_EMAIL"
+    export BITBUCKET_API_TOKEN="$BITBUCKET_API_TOKEN"
+    export BITBUCKET_USERNAME="$BITBUCKET_USERNAME"
+    export BITBUCKET_WORKSPACE="$BITBUCKET_WORKSPACE"
+    export BACKUP_WORKSPACE="$BACKUP_WORKSPACE"
+    export BACKUP_BASE_DIR="$BACKUP_BASE_DIR"
+    
+    # Print debug info
+    log_info "Environment check:"
+    log_info "  ATLASSIAN_EMAIL: ${ATLASSIAN_EMAIL:0:10}..."
+    log_info "  BITBUCKET_WORKSPACE: $BITBUCKET_WORKSPACE"
+    log_info "  BACKUP_WORKSPACE: $BACKUP_WORKSPACE"
+    
+    # Run Python backup script with environment variables
     cd "$BACKUP_BASE_DIR"
-    if python3 scripts/bitbucket-backup.py; then
+    
+    # Method 1: Direct execution with env vars
+    if env ATLASSIAN_EMAIL="$ATLASSIAN_EMAIL" \
+           BITBUCKET_API_TOKEN="$BITBUCKET_API_TOKEN" \
+           BITBUCKET_USERNAME="$BITBUCKET_USERNAME" \
+           BITBUCKET_WORKSPACE="$BITBUCKET_WORKSPACE" \
+           BACKUP_WORKSPACE="$BACKUP_WORKSPACE" \
+           BACKUP_BASE_DIR="$BACKUP_BASE_DIR" \
+           python3 scripts/bitbucket-backup.py; then
         log_success "Backup completed successfully!"
         echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$BACKUP_STATE_FILE"
     else

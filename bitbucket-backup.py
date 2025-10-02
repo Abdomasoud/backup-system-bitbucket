@@ -23,6 +23,7 @@ class BitbucketMetadataBackup:
         self.bitbucket_api_token = os.environ.get('BITBUCKET_API_TOKEN', '')
         self.bitbucket_workspace = os.environ.get('BITBUCKET_WORKSPACE', '')
         self.backup_workspace = os.environ.get('BACKUP_WORKSPACE', '')  # Target workspace for mirror repos
+        self.bitbucket_username = os.environ.get('BITBUCKET_USERNAME', '')  # Bitbucket username for git URLs
         
         # Local backup configuration
         self.backup_base_dir = os.environ.get('BACKUP_BASE_DIR', '/opt/bitbucket-backup')
@@ -205,12 +206,26 @@ class BitbucketMetadataBackup:
         
         self.log(f"📥 Cloning {repo_name}...")
         
-        # Construct authenticated URL using email and API token
-        auth_url = clone_url.replace('https://', f'https://{self.atlassian_email}:{self.bitbucket_api_token}@')
+        # Fix: Properly construct authenticated URL handling existing credentials
+        # Remove any existing credentials and protocol, then add our credentials
+        if '@' in clone_url:
+            # URL already has credentials, extract just the domain part after @
+            base_url = clone_url.split('@', 1)[1]  # Get everything after first @
+        else:
+            # URL has no credentials, just remove https://
+            base_url = clone_url.replace('https://', '')
+        
+        # Use username instead of email for git authentication (emails have @ symbols)
+        username = self.bitbucket_username if self.bitbucket_username else self.bitbucket_workspace
+        auth_url = f'https://{username}:{self.bitbucket_api_token}@{base_url}'
+        
+        # Debug logging
+        self.log(f"Debug - Original URL: {clone_url}")
+        self.log(f"Debug - Base URL extracted: {base_url}")
+        self.log(f"Debug - Using username: {username}")
+        self.log(f"Debug - Final auth URL (masked): https://{username}:***@{base_url}")
         
         try:
-            # Clone with better error handling and Ubuntu optimization
-            
             # Clone bare repository (more efficient for backups)
             mirror_result = subprocess.run([
                 'git', 'clone', '--mirror', auth_url, f'{timestamped_dir}/repo.git'
@@ -298,8 +313,17 @@ class BitbucketMetadataBackup:
             self.log(f"❌ No HTTPS clone URL found for mirror {mirror_name}")
             return False
         
-        # Construct authenticated URL using email and API token
-        auth_url = clone_url.replace('https://', f'https://{self.atlassian_email}:{self.bitbucket_api_token}@')
+        # Fix: Properly construct authenticated URL handling existing credentials
+        if '@' in clone_url:
+            # URL already has credentials, extract just the domain part after @
+            base_url = clone_url.split('@', 1)[1]  # Get everything after first @
+        else:
+            # URL has no credentials, just remove https://
+            base_url = clone_url.replace('https://', '')
+        
+        # Use username instead of email for git authentication (emails have @ symbols)
+        username = self.bitbucket_username if self.bitbucket_username else self.bitbucket_workspace
+        auth_url = f'https://{username}:{self.bitbucket_api_token}@{base_url}'
         
         try:
             mirror_git_dir = os.path.join(local_repo_path, 'repo.git')
@@ -478,6 +502,7 @@ Usage:
                 backup_system.bitbucket_workspace, backup_system.backup_workspace]):
         backup_system.log("❌ Missing required environment variables!")
         backup_system.log("Required: ATLASSIAN_EMAIL, BITBUCKET_API_TOKEN, BITBUCKET_WORKSPACE, BACKUP_WORKSPACE")
+        backup_system.log("Optional but recommended: BITBUCKET_USERNAME (for git authentication)")
         sys.exit(1)
     
     # Run backup
