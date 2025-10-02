@@ -15,6 +15,11 @@ import time
 import tarfile
 import shutil
 import subprocess
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 
 class BitbucketMetadataBackup:
     def __init__(self):
@@ -29,6 +34,15 @@ class BitbucketMetadataBackup:
         self.backup_base_dir = os.environ.get('BACKUP_BASE_DIR', '/opt/bitbucket-backup')
         self.max_backups = int(os.environ.get('MAX_BACKUPS', '5'))
         
+        # Email notification configuration
+        self.email_enabled = os.environ.get('EMAIL_NOTIFICATIONS', 'false').lower() == 'true'
+        self.smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
+        self.smtp_port = int(os.environ.get('SMTP_PORT', '587'))
+        self.email_username = os.environ.get('EMAIL_USERNAME', '')
+        self.email_password = os.environ.get('EMAIL_PASSWORD', '')
+        self.notification_email = os.environ.get('NOTIFICATION_EMAIL', '')
+        self.email_from = os.environ.get('EMAIL_FROM', self.email_username)
+        
         # Bitbucket API setup
         self.base_url = 'https://api.bitbucket.org/2.0'
         self.auth = (self.atlassian_email, self.bitbucket_api_token)
@@ -42,6 +56,18 @@ class BitbucketMetadataBackup:
         # Setup directories
         self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.setup_directories()
+        
+        # Initialize backup statistics
+        self.backup_stats = {
+            'start_time': datetime.now(),
+            'end_time': None,
+            'total_repos': 0,
+            'successful_repos': 0,
+            'failed_repos': 0,
+            'total_size': 0,
+            'repo_details': [],
+            'errors': []
+        }
         
     def setup_directories(self):
         """Create necessary backup directories"""
@@ -682,6 +708,211 @@ class BitbucketMetadataBackup:
                 except Exception as e:
                     self.log(f"❌ Error removing directory {dir_to_remove}: {e}")
     
+    def send_email_notification(self, success=True):
+        """Send email notification with backup report"""
+        if not self.email_enabled or not self.notification_email:
+            self.log("📧 Email notifications disabled or no recipient configured")
+            return
+        
+        try:
+            # Calculate statistics
+            duration = self.backup_stats['end_time'] - self.backup_stats['start_time']
+            success_rate = (self.backup_stats['successful_repos'] / max(self.backup_stats['total_repos'], 1)) * 100
+            
+            # Email subject
+            status = "✅ SUCCESS" if success else "❌ FAILED"
+            subject = f"Bitbucket Backup Report {status} - {self.timestamp}"
+            
+            # Create email message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = self.email_from
+            msg['To'] = self.notification_email
+            
+            # Create HTML email body
+            html_body = self.create_email_html_body(success, duration, success_rate)
+            
+            # Create plain text version
+            text_body = self.create_email_text_body(success, duration, success_rate)
+            
+            # Attach both versions
+            part1 = MIMEText(text_body, 'plain')
+            part2 = MIMEText(html_body, 'html')
+            
+            msg.attach(part1)
+            msg.attach(part2)
+            
+            # Attach log file if exists
+            log_file = os.path.join(self.logs_dir, f'backup_{self.timestamp}.log')
+            if os.path.exists(log_file):
+                with open(log_file, 'rb') as f:
+                    attachment = MIMEBase('application', 'octet-stream')
+                    attachment.set_payload(f.read())
+                    encoders.encode_base64(attachment)
+                    attachment.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename="backup_{self.timestamp}.log"'
+                    )
+                    msg.attach(attachment)
+            
+            # Send email
+            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            server.starttls()
+            server.login(self.email_username, self.email_password)
+            
+            text = msg.as_string()
+            server.sendmail(self.email_from, self.notification_email, text)
+            server.quit()
+            
+            self.log(f"📧 ✅ Email notification sent to {self.notification_email}")
+            
+        except Exception as e:
+            self.log(f"📧 ❌ Failed to send email notification: {e}")
+    
+    def create_email_html_body(self, success, duration, success_rate):
+        """Create HTML email body with backup report"""
+        status_color = "#28a745" if success else "#dc3545"
+        status_text = "SUCCESS" if success else "FAILED"
+        
+        # Repository details table
+        repo_rows = ""
+        for repo in self.backup_stats['repo_details']:
+            status_icon = "✅" if repo['success'] else "❌"
+            repo_rows += f"""
+            <tr>
+                <td style="padding: 8px; border: 1px solid #ddd;">{repo['name']}</td>
+                <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{status_icon}</td>
+                <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{repo.get('size', 'N/A')}</td>
+                <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{repo.get('metadata_items', 'N/A')}</td>
+            </tr>
+            """
+        
+        # Error details
+        error_section = ""
+        if self.backup_stats['errors']:
+            error_list = "\n".join([f"<li>{error}</li>" for error in self.backup_stats['errors'][:10]])  # Limit to 10 errors
+            error_section = f"""
+            <div style="margin: 20px 0; padding: 15px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px;">
+                <h3 style="color: #721c24; margin-top: 0;">Errors Encountered:</h3>
+                <ul style="margin: 0;">
+                    {error_list}
+                </ul>
+                {f'<p><strong>... and {len(self.backup_stats["errors"]) - 10} more errors</strong></p>' if len(self.backup_stats['errors']) > 10 else ''}
+            </div>
+            """
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Bitbucket Backup Report</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5;">
+            <div style="max-width: 800px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <h1 style="color: {status_color}; text-align: center; margin-bottom: 30px;">
+                    🔄 Bitbucket Backup Report - {status_text}
+                </h1>
+                
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+                    <h2 style="margin-top: 0; color: #495057;">📊 Summary Statistics</h2>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div><strong>Backup Date:</strong> {self.backup_stats['start_time'].strftime('%Y-%m-%d %H:%M:%S')}</div>
+                        <div><strong>Duration:</strong> {str(duration).split('.')[0]}</div>
+                        <div><strong>Total Repositories:</strong> {self.backup_stats['total_repos']}</div>
+                        <div><strong>Successful:</strong> {self.backup_stats['successful_repos']}</div>
+                        <div><strong>Failed:</strong> {self.backup_stats['failed_repos']}</div>
+                        <div><strong>Success Rate:</strong> {success_rate:.1f}%</div>
+                    </div>
+                </div>
+                
+                <div style="margin: 20px 0;">
+                    <h2 style="color: #495057;">📁 Repository Details</h2>
+                    <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                        <thead>
+                            <tr style="background-color: #e9ecef;">
+                                <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Repository</th>
+                                <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">Status</th>
+                                <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Size</th>
+                                <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">Metadata Items</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {repo_rows}
+                        </tbody>
+                    </table>
+                </div>
+                
+                {error_section}
+                
+                <div style="margin-top: 30px; padding: 15px; background-color: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px;">
+                    <h3 style="color: #0c5460; margin-top: 0;">💾 Backup Configuration</h3>
+                    <ul style="margin: 0;">
+                        <li><strong>Workspace:</strong> {self.bitbucket_workspace}</li>
+                        <li><strong>Backup Location:</strong> {self.backup_base_dir}</li>
+                        <li><strong>Mirror Workspace:</strong> {self.backup_workspace}</li>
+                        <li><strong>Retention:</strong> {self.max_backups} backups per repository</li>
+                    </ul>
+                </div>
+                
+                <div style="margin-top: 20px; text-align: center; color: #6c757d; font-size: 12px;">
+                    <p>Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html
+    
+    def create_email_text_body(self, success, duration, success_rate):
+        """Create plain text email body with backup report"""
+        status_text = "SUCCESS" if success else "FAILED"
+        
+        # Repository details
+        repo_details = "\n".join([
+            f"  - {repo['name']}: {'✅ Success' if repo['success'] else '❌ Failed'} ({repo.get('size', 'N/A')})"
+            for repo in self.backup_stats['repo_details']
+        ])
+        
+        # Error details
+        error_section = ""
+        if self.backup_stats['errors']:
+            error_list = "\n".join([f"  - {error}" for error in self.backup_stats['errors'][:10]])
+            error_section = f"""
+
+Errors Encountered:
+{error_list}
+{f'... and {len(self.backup_stats["errors"]) - 10} more errors' if len(self.backup_stats['errors']) > 10 else ''}
+"""
+        
+        text = f"""
+Bitbucket Backup Report - {status_text}
+{'=' * 50}
+
+Summary Statistics:
+- Backup Date: {self.backup_stats['start_time'].strftime('%Y-%m-%d %H:%M:%S')}
+- Duration: {str(duration).split('.')[0]}
+- Total Repositories: {self.backup_stats['total_repos']}
+- Successful: {self.backup_stats['successful_repos']}
+- Failed: {self.backup_stats['failed_repos']}
+- Success Rate: {success_rate:.1f}%
+
+Repository Details:
+{repo_details}
+{error_section}
+
+Backup Configuration:
+- Workspace: {self.bitbucket_workspace}
+- Backup Location: {self.backup_base_dir}
+- Mirror Workspace: {self.backup_workspace}
+- Retention: {self.max_backups} backups per repository
+
+Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        
+        return text
+    
     def backup_all_repositories(self):
         """Main function to backup all repositories"""
         self.log("🚀 Starting Bitbucket backup process...")
@@ -691,8 +922,14 @@ class BitbucketMetadataBackup:
         
         if not repositories:
             self.log("❌ No repositories found or error fetching repositories")
+            self.backup_stats['end_time'] = datetime.now()
+            self.backup_stats['errors'].append("No repositories found or error fetching repositories")
+            if self.email_enabled:
+                self.send_email_notification(success=False)
             return False
         
+        # Update statistics
+        self.backup_stats['total_repos'] = len(repositories)
         success_count = 0
         
         for repo in repositories:
@@ -701,9 +938,34 @@ class BitbucketMetadataBackup:
             self.log(f"Processing repository: {repo_name}")
             self.log(f"{'='*50}")
             
+            repo_stats = {
+                'name': repo_name,
+                'success': False,
+                'size': 'N/A',
+                'metadata_items': 0
+            }
+            
             try:
                 # 1. Backup metadata
                 metadata_path = self.backup_repository_metadata(repo)
+                
+                # Count metadata items
+                if metadata_path and os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                            repo_stats['metadata_items'] = (
+                                metadata.get('total_prs', 0) +
+                                metadata.get('total_issues', 0) +
+                                metadata.get('total_branches', 0) +
+                                metadata.get('total_tags', 0) +
+                                metadata.get('total_permissions', 0) +
+                                metadata.get('total_webhooks', 0) +
+                                metadata.get('total_deploy_keys', 0) +
+                                metadata.get('total_branch_restrictions', 0)
+                            )
+                    except Exception:
+                        pass
                 
                 # 2. Clone repository locally
                 local_repo_path = self.clone_repository(repo)
@@ -716,24 +978,51 @@ class BitbucketMetadataBackup:
                     self.push_to_mirror(local_repo_path, mirror_repo)
                 
                 # 5. Create compressed backup
+                backup_file = None
                 if local_repo_path and metadata_path:
-                    self.create_compressed_backup(repo_name, local_repo_path, metadata_path)
+                    backup_file = self.create_compressed_backup(repo_name, local_repo_path, metadata_path)
+                
+                # Calculate backup size
+                if backup_file and os.path.exists(backup_file):
+                    size_bytes = os.path.getsize(backup_file)
+                    if size_bytes > 1024 * 1024:  # > 1MB
+                        repo_stats['size'] = f"{size_bytes / (1024*1024):.1f} MB"
+                    else:
+                        repo_stats['size'] = f"{size_bytes / 1024:.1f} KB"
+                    self.backup_stats['total_size'] += size_bytes
                 
                 # 6. Cleanup old backups
                 self.cleanup_old_backups(repo_name)
                 
                 success_count += 1
+                repo_stats['success'] = True
                 self.log(f"✅ Successfully processed {repo_name}")
                 
             except Exception as e:
-                self.log(f"❌ Error processing {repo_name}: {e}")
+                error_msg = f"Error processing {repo_name}: {e}"
+                self.log(f"❌ {error_msg}")
+                self.backup_stats['errors'].append(error_msg)
                 continue
+            finally:
+                self.backup_stats['repo_details'].append(repo_stats)
             
             # Small delay to be nice to the API
             time.sleep(1)
         
+        # Update final statistics
+        self.backup_stats['successful_repos'] = success_count
+        self.backup_stats['failed_repos'] = len(repositories) - success_count
+        self.backup_stats['end_time'] = datetime.now()
+        
+        # Log final results
+        overall_success = success_count == len(repositories)
         self.log(f"\n🎉 Backup completed! Successfully processed {success_count}/{len(repositories)} repositories")
-        return success_count == len(repositories)
+        
+        # Send email notification
+        if self.email_enabled:
+            self.send_email_notification(success=overall_success)
+        
+        return overall_success
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == '--help':
@@ -747,6 +1036,15 @@ Environment Variables Required:
 - BACKUP_WORKSPACE: Target workspace for mirror repositories
 - BACKUP_BASE_DIR: Local directory for backups (default: /opt/bitbucket-backup)
 - MAX_BACKUPS: Number of backups to retain (default: 5)
+
+Optional Email Notification Variables:
+- EMAIL_NOTIFICATIONS: Enable email notifications (true/false, default: false)
+- SMTP_SERVER: SMTP server address (default: smtp.gmail.com)
+- SMTP_PORT: SMTP server port (default: 587)
+- EMAIL_USERNAME: SMTP authentication username
+- EMAIL_PASSWORD: SMTP authentication password (use app password for Gmail)
+- NOTIFICATION_EMAIL: Email address to receive notifications
+- EMAIL_FROM: Email sender address (default: same as EMAIL_USERNAME)
 
 Usage:
     python3 bitbucket-backup.py
