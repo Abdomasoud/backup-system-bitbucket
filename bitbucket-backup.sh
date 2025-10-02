@@ -1,129 +1,108 @@
 #!/bin/bash
-# Simple Bitbucket Backup Script
-# No systemd, no venv - just pure backup automation
+# Bitbucket Repository Backup Script
+# Simple & Reliable - No virtual environments needed
 
 set -e
 
-# Load environment variables from config file if it exists
-if [[ -f "${BACKUP_BASE_DIR}/config/.env" ]]; then
-    source "${BACKUP_BASE_DIR}/config/.env"
-    log_info "Loaded environment variables from config/.env"
-elif [[ -f "$(dirname "$0")/../config/.env" ]]; then
-    source "$(dirname "$0")/../config/.env"
-    log_info "Loaded environment variables from ../config/.env"
-fi
-
-# Configuration - Edit these values or set as environment variables
-ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
-BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"
-BITBUCKET_WORKSPACE="${BITBUCKET_WORKSPACE:-your-source-workspace}"
-BACKUP_WORKSPACE="${BACKUP_WORKSPACE:-your-backup-workspace}"
-
-# Backup configuration
-BACKUP_BASE_DIR="${BACKUP_BASE_DIR:-/opt/bitbucket-backup}"
-MAX_BACKUPS="${MAX_BACKUPS:-5}"
-BACKUP_INTERVAL_DAYS="${BACKUP_INTERVAL_DAYS:-3}"
-
-# Logging configuration
-LOGS_DIR="${BACKUP_BASE_DIR}/logs"
-TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-LOG_FILE="${LOGS_DIR}/backup_${TIMESTAMP}.log"
-
-# Colors for output
+# Colors and formatting
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 PURPLE='\033[0;35m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+NC='\033[0m'
 
-# Ensure we have required directories
-mkdir -p "${BACKUP_BASE_DIR}" "${LOGS_DIR}"
+# Get script directory and backup base directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP_BASE_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Logging function
+# Load environment variables from config file
+load_env_config() {
+    local env_file=""
+    
+    # Try multiple locations for .env file
+    if [[ -f "$BACKUP_BASE_DIR/config/.env" ]]; then
+        env_file="$BACKUP_BASE_DIR/config/.env"
+    elif [[ -f "$SCRIPT_DIR/../config/.env" ]]; then
+        env_file="$SCRIPT_DIR/../config/.env"
+    elif [[ -f "/opt/bitbucket-backup/config/.env" ]]; then
+        env_file="/opt/bitbucket-backup/config/.env"
+    fi
+    
+    if [[ -n "$env_file" && -f "$env_file" ]]; then
+        source "$env_file"
+        log_info "Loaded environment variables from: $env_file"
+    else
+        log_warning "No .env file found. Using environment variables or defaults."
+    fi
+}
+
+# Initialize configuration variables after loading env
+init_config() {
+    # Load environment first
+    load_env_config
+    
+    # Set configuration with loaded values or defaults
+    ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
+    BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"
+    BITBUCKET_WORKSPACE="${BITBUCKET_WORKSPACE:-your-source-workspace}"
+    BACKUP_WORKSPACE="${BACKUP_WORKSPACE:-your-backup-workspace}"
+    
+    # Other settings
+    BACKUP_DIR="${BACKUP_BASE_DIR}/repositories"
+    METADATA_DIR="${BACKUP_BASE_DIR}/metadata"
+    TEMP_DIR="${BACKUP_BASE_DIR}/temp"
+    LOG_DIR="${BACKUP_BASE_DIR}/logs"
+    
+    # Backup scheduling (every 3 days)
+    BACKUP_INTERVAL_HOURS=72
+    BACKUP_STATE_FILE="${BACKUP_BASE_DIR}/.last_backup"
+    RETENTION_COUNT=5
+}
+
+# Logging functions
 log() {
-    local level=$1
-    shift
-    local message="$@"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${timestamp} - ${level} - ${message}" | tee -a "${LOG_FILE}"
+    echo "[$timestamp] - $1 - $2" >> "${LOG_DIR}/backup_$(date +%Y%m%d_%H%M%S).log"
 }
 
 log_info() {
-    log "INFO" "$@"
-    echo -e "${BLUE}ℹ️  $@${NC}"
+    log "INFO" "$1"
+    echo -e "ℹ️  $1"
 }
 
 log_success() {
-    log "SUCCESS" "$@"
-    echo -e "${GREEN}✅ $@${NC}"
+    log "SUCCESS" "$1"
+    echo -e "✅ $1"
 }
 
 log_error() {
-    log "ERROR" "$@"
-    echo -e "${RED}❌ $@${NC}"
+    log "ERROR" "$1"
+    echo -e "❌ $1"
 }
 
 log_warning() {
-    log "WARNING" "$@"
-    echo -e "${YELLOW}⚠️  $@${NC}"
-}
-
-log_process() {
-    log "PROCESS" "$@"
-    echo -e "${PURPLE}🔄 $@${NC}"
-}
-
-# Check if we're running on the right schedule (every 3 days)
-check_schedule() {
-    local last_run_file="${BACKUP_BASE_DIR}/.last_backup_run"
-    local current_date=$(date +%s)
-    local interval_seconds=$((BACKUP_INTERVAL_DAYS * 24 * 60 * 60))
-    
-    if [[ -f "$last_run_file" ]]; then
-        local last_run=$(cat "$last_run_file")
-        local time_diff=$((current_date - last_run))
-        
-        if [[ $time_diff -lt $interval_seconds ]]; then
-            local hours_remaining=$(( (interval_seconds - time_diff) / 3600 ))
-            log_info "Backup not due yet. Next backup in ${hours_remaining} hours."
-            
-            # Unless forced
-            if [[ "$1" != "--force" ]]; then
-                exit 0
-            else
-                log_warning "Forcing backup despite schedule..."
-            fi
-        fi
-    fi
-    
-    # Update last run timestamp
-    echo "$current_date" > "$last_run_file"
+    log "WARNING" "$1"
+    echo -e "⚠️  $1"
 }
 
 # Check dependencies
 check_dependencies() {
     log_info "Checking system dependencies..."
     
-    local missing_deps=()
+    local required_commands=("git" "curl" "jq" "python3")
+    local missing_commands=()
     
-    # Check required tools
-    for tool in git python3 curl jq; do
-        if ! command -v "$tool" &> /dev/null; then
-            missing_deps+=("$tool")
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_commands+=("$cmd")
         fi
     done
     
-    if [[ ${#missing_deps[@]} -gt 0 ]]; then
-        log_error "Missing dependencies: ${missing_deps[*]}"
+    if [[ ${#missing_commands[@]} -gt 0 ]]; then
+        log_error "Missing required commands: ${missing_commands[*]}"
         log_info "Please install missing dependencies"
-        exit 1
-    fi
-    
-    # Check Python modules
-    if ! python3 -c "import requests, json, os" 2>/dev/null; then
-        log_error "Missing Python modules. Please install:"
-        log_error "pip3 install requests python-dotenv"
         exit 1
     fi
     
@@ -158,7 +137,7 @@ validate_config() {
     
     if [[ "$config_valid" != true ]]; then
         log_error "Configuration validation failed!"
-        log_info "Please set the required environment variables or edit this script"
+        log_info "Please edit /opt/bitbucket-backup/config/.env with your credentials"
         exit 1
     fi
     
@@ -200,15 +179,14 @@ setup_directories() {
     log_info "Setting up directory structure..."
     
     local directories=(
-        "${BACKUP_BASE_DIR}/repositories"
-        "${BACKUP_BASE_DIR}/metadata"
-        "${BACKUP_BASE_DIR}/logs"
-        "${BACKUP_BASE_DIR}/temp"
+        "$BACKUP_DIR"
+        "$METADATA_DIR"
+        "$TEMP_DIR"
+        "$LOG_DIR"
     )
     
     for dir in "${directories[@]}"; do
         mkdir -p "$dir"
-        log_info "Created directory: $dir"
     done
     
     log_success "Directory structure ready"
@@ -216,137 +194,46 @@ setup_directories() {
 
 # Main backup process
 run_backup() {
-    log_info "🚀 Starting Bitbucket backup process..."
-    log_info "Timestamp: $TIMESTAMP"
-    log_info "Workspace: $BITBUCKET_WORKSPACE → $BACKUP_WORKSPACE"
+    log_info "🚀 Starting full backup process..."
     
-    # Set environment variables for Python script
-    export ATLASSIAN_EMAIL
-    export BITBUCKET_API_TOKEN
-    export BITBUCKET_WORKSPACE
-    export BACKUP_WORKSPACE
-    export BACKUP_BASE_DIR
-    export MAX_BACKUPS
-    
-    # Run the Python backup script
-    local python_script="$(dirname "$0")/bitbucket-backup.py"
-    
-    if [[ -f "$python_script" ]]; then
-        log_process "Executing Python backup script..."
-        
-        if python3 "$python_script"; then
-            log_success "Python backup script completed successfully"
-        else
-            log_error "Python backup script failed"
-            return 1
-        fi
+    # Run Python backup script (no venv needed)
+    cd "$BACKUP_BASE_DIR"
+    if python3 scripts/bitbucket-backup.py; then
+        log_success "Backup completed successfully!"
+        echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$BACKUP_STATE_FILE"
     else
-        log_error "Python backup script not found: $python_script"
-        return 1
+        log_error "Backup failed!"
+        exit 1
     fi
-    
-    return 0
 }
 
-# Generate backup report
-generate_report() {
-    log_info "Generating backup report..."
-    
-    local report_file="${LOGS_DIR}/backup_report_${TIMESTAMP}.txt"
-    local repos_dir="${BACKUP_BASE_DIR}/repositories"
-    
-    cat > "$report_file" << EOF
-===================================
-Bitbucket Backup Report
-===================================
-Backup Date: $(date)
-Workspace: ${BITBUCKET_WORKSPACE}
-Backup Location: ${BACKUP_BASE_DIR}
-Max Backups per Repo: ${MAX_BACKUPS}
-
-Repository Summary:
-EOF
-    
-    if [[ -d "$repos_dir" ]]; then
-        for repo_dir in "$repos_dir"/*; do
-            if [[ -d "$repo_dir" ]]; then
-                local repo_name=$(basename "$repo_dir")
-                local backup_count=$(find "$repo_dir" -name "*.tar.gz" 2>/dev/null | wc -l)
-                local latest_backup=$(find "$repo_dir" -name "*.tar.gz" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-                
-                echo "  📁 $repo_name:" >> "$report_file"
-                echo "     - Backups: $backup_count" >> "$report_file"
-                
-                if [[ -n "$latest_backup" ]]; then
-                    local backup_size=$(du -h "$latest_backup" 2>/dev/null | cut -f1)
-                    echo "     - Latest: $(basename "$latest_backup") (${backup_size})" >> "$report_file"
-                fi
-                
-                echo "" >> "$report_file"
-            fi
-        done
+# Check if backup is due
+is_backup_due() {
+    if [[ ! -f "$BACKUP_STATE_FILE" ]]; then
+        return 0  # No previous backup, so it's due
     fi
     
-    echo "" >> "$report_file"
-    echo "Disk Usage:" >> "$report_file"
-    echo "$(du -sh "$BACKUP_BASE_DIR" 2>/dev/null || echo 'Unable to calculate')" >> "$report_file"
+    local last_backup=$(cat "$BACKUP_STATE_FILE" 2>/dev/null || echo "1970-01-01 00:00:00")
+    local last_backup_epoch=$(date -d "$last_backup" +%s 2>/dev/null || echo 0)
+    local current_epoch=$(date +%s)
+    local time_diff=$(( (current_epoch - last_backup_epoch) / 3600 ))
     
-    log_success "Backup report generated: $report_file"
-    
-    # Display summary
-    log_info "📊 Backup Summary:"
-    cat "$report_file" | grep -E "(Repository Summary:|📁|Disk Usage:)" | while read -r line; do
-        log_info "$line"
-    done
-}
-
-# Show help
-show_help() {
-    cat << EOF
-🔄 Simple Bitbucket Backup System
-
-A straightforward backup solution for all Bitbucket repositories with:
-- Automatic repository discovery and cloning
-- Mirror repository creation
-- Compressed tar.gz backups with rotation
-- Metadata backup (PRs, issues, branches, tags)
-- Retention management (keeps 5 backups per repo)
-- Scheduled execution every 3 days
-
-Usage:
-  $0 [OPTIONS]
-
-Options:
-  --help          Show this help message
-  --force         Force backup even if not scheduled
-  --test-only     Only test API connection, don't backup
-
-Environment Variables:
-  ATLASSIAN_EMAIL        Your Atlassian account email
-  BITBUCKET_API_TOKEN    Your Bitbucket API token
-  BITBUCKET_WORKSPACE    Source workspace to backup
-  BACKUP_WORKSPACE       Target workspace for mirrors
-  BACKUP_BASE_DIR        Local backup directory (default: /opt/bitbucket-backup)
-  MAX_BACKUPS           Number of backups to retain (default: 5)
-
-Setup:
-1. Create a Bitbucket API token with repository permissions
-2. Set environment variables or edit this script  
-3. Run with --test-only first to verify configuration
-4. Add to cron for automatic execution:
-   0 2 */3 * * /path/to/bitbucket-backup.sh
-
-EOF
+    if [[ $time_diff -ge $BACKUP_INTERVAL_HOURS ]]; then
+        return 0  # Backup is due
+    else
+        local hours_remaining=$(( BACKUP_INTERVAL_HOURS - time_diff ))
+        log_info "Backup not due yet. Next backup in ${hours_remaining} hours."
+        return 1  # Backup not due
+    fi
 }
 
 # Main function
 main() {
-    # Parse command line arguments
+    # Initialize configuration (loads .env file automatically)
+    init_config
+    
+    # Handle command line arguments
     case "${1:-}" in
-        --help|-h)
-            show_help
-            exit 0
-            ;;
         --test-only)
             log_info "🧪 Running connection test only..."
             check_dependencies
@@ -356,36 +243,47 @@ main() {
             exit 0
             ;;
         --force)
-            log_warning "🔧 Forcing backup execution..."
+            log_info "🔄 Forcing backup run (ignoring schedule)..."
+            check_dependencies
+            validate_config
+            test_api_connection
+            setup_directories
+            run_backup
+            exit 0
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --test-only    Test API connection and configuration only"
+            echo "  --force        Force backup run (ignore schedule)"
+            echo "  --help, -h     Show this help message"
+            echo ""
+            echo "Configuration file: /opt/bitbucket-backup/config/.env"
+            echo "Required variables:"
+            echo "  ATLASSIAN_EMAIL      - Your Atlassian account email"
+            echo "  BITBUCKET_API_TOKEN  - Your Bitbucket API token"
+            echo "  BITBUCKET_WORKSPACE  - Source workspace name"
+            echo "  BACKUP_WORKSPACE     - Backup workspace name"
+            exit 0
+            ;;
+        "")
+            # Normal scheduled run
+            check_dependencies
+            validate_config
+            
+            if is_backup_due; then
+                test_api_connection
+                setup_directories
+                run_backup
+            fi
             ;;
         *)
-            # Check if backup is due (unless forced)
-            check_schedule "$1"
+            log_error "Unknown option: $1"
+            log_info "Use --help for usage information"
+            exit 1
             ;;
     esac
-    
-    # Pre-flight checks
-    check_dependencies
-    validate_config
-    test_api_connection
-    setup_directories
-    
-    # Run backup
-    if run_backup; then
-        log_success "🎉 Backup process completed successfully!"
-        generate_report
-        
-        log_info "💾 Backup Location: ${BACKUP_BASE_DIR}"
-        log_info "📊 Check logs: ${LOG_FILE}"
-        
-    else
-        log_error "💥 Backup process failed!"
-        exit 1
-    fi
 }
 
-# Trap errors and cleanup
-trap 'log_error "Script interrupted or failed at line $LINENO"' ERR
-
-# Run main function with all arguments
 main "$@"
