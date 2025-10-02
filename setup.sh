@@ -73,6 +73,27 @@ install_basic_dependencies() {
     log_success "Basic dependencies installed"
 }
 
+create_backup_directory() {
+    log_info "Creating backup directory structure..."
+    
+    # Create main backup directory
+    mkdir -p "$BACKUP_DIR"
+    
+    # Create subdirectories
+    mkdir -p "$BACKUP_DIR/scripts"
+    mkdir -p "$BACKUP_DIR/config" 
+    mkdir -p "$BACKUP_DIR/logs"
+    mkdir -p "$BACKUP_DIR/repositories"
+    mkdir -p "$BACKUP_DIR/metadata"
+    mkdir -p "$BACKUP_DIR/temp"
+    
+    # Set proper permissions (all as root)
+    chmod 755 "$BACKUP_DIR"
+    chmod 755 "$BACKUP_DIR"/*
+    
+    log_success "Backup directory structure created at: $BACKUP_DIR"
+}
+
 create_venv() {
     log_info "Creating Python virtual environment for Ubuntu 24 (as root)..."
     
