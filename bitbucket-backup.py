@@ -27,9 +27,9 @@ class BitbucketMigrationSystem:
         self.migration_mode = os.environ.get('MIGRATION_MODE', 'true').lower() == 'true'
         
         # SOURCE ACCOUNT Configuration (account to migrate FROM)
-        self.source_email = os.environ.get('SOURCE_ATLASSIAN_EMAIL', os.environ.get('ATLASSIAN_EMAIL', ''))
-        self.source_api_token = os.environ.get('SOURCE_BITBUCKET_API_TOKEN', os.environ.get('BITBUCKET_API_TOKEN', ''))
-        self.source_username = os.environ.get('SOURCE_BITBUCKET_USERNAME', os.environ.get('BITBUCKET_USERNAME', ''))
+        self.source_email = os.environ.get('SOURCE_ATLASSIAN_EMAIL', '')
+        self.source_api_token = os.environ.get('SOURCE_BITBUCKET_API_TOKEN', '')
+        self.source_username = os.environ.get('SOURCE_BITBUCKET_USERNAME', '')
         
         # Multi-workspace support
         self.multi_workspace_mode = os.environ.get('MULTI_WORKSPACE_MODE', 'false').lower() == 'true'
@@ -37,9 +37,9 @@ class BitbucketMigrationSystem:
         self.dest_workspaces = self._parse_workspaces(os.environ.get('DEST_BITBUCKET_WORKSPACES', ''))
         self.workspace_mapping = self._parse_workspace_mapping(os.environ.get('WORKSPACE_MAPPING', ''))
         
-        # Single workspace (legacy support)
-        self.source_workspace = os.environ.get('SOURCE_BITBUCKET_WORKSPACE', os.environ.get('BITBUCKET_WORKSPACE', ''))
-        self.dest_workspace = os.environ.get('DEST_BITBUCKET_WORKSPACE', os.environ.get('BACKUP_WORKSPACE', ''))
+        # Single workspace support
+        self.source_workspace = os.environ.get('SOURCE_BITBUCKET_WORKSPACE', '')
+        self.dest_workspace = os.environ.get('DEST_BITBUCKET_WORKSPACE', '')
         
         # DESTINATION ACCOUNT Configuration (account to migrate TO) 
         self.dest_email = os.environ.get('DEST_ATLASSIAN_EMAIL', '')
@@ -55,12 +55,9 @@ class BitbucketMigrationSystem:
         self.create_missing_workspaces = os.environ.get('CREATE_MISSING_WORKSPACES', 'true').lower() == 'true'
         self.migration_batch_size = int(os.environ.get('MIGRATION_BATCH_SIZE', '5'))
         
-        # Legacy support (backward compatibility)
-        self.atlassian_email = self.source_email
-        self.bitbucket_api_token = self.source_api_token
-        self.bitbucket_workspace = self.source_workspace
-        self.backup_workspace = self.dest_workspace
-        self.bitbucket_username = self.source_username
+        # Set up authentication objects
+        self.source_auth = (self.source_email, self.source_api_token)
+        self.dest_auth = (self.dest_email, self.dest_api_token)
         
         # Local backup configuration
         self.backup_base_dir = os.environ.get('BACKUP_BASE_DIR', '/opt/bitbucket-backup')
@@ -2563,12 +2560,12 @@ Examples:
     
     backup_system = BitbucketMigrationSystem()
     
-    # Verify configuration
-    if not all([backup_system.atlassian_email, backup_system.bitbucket_api_token, 
-                backup_system.bitbucket_workspace, backup_system.backup_workspace]):
-        backup_system.log("❌ Missing required environment variables!")
-        backup_system.log("Required: ATLASSIAN_EMAIL, BITBUCKET_API_TOKEN, BITBUCKET_WORKSPACE, BACKUP_WORKSPACE")
-        backup_system.log("Optional but recommended: BITBUCKET_USERNAME (for git authentication)")
+    # Verify dual-account configuration
+    if not all([backup_system.source_email, backup_system.source_api_token]):
+        backup_system.log("❌ Missing required SOURCE account configuration!")
+        backup_system.log("Required: SOURCE_ATLASSIAN_EMAIL, SOURCE_BITBUCKET_API_TOKEN")
+        backup_system.log("For migration: DEST_ATLASSIAN_EMAIL, DEST_BITBUCKET_API_TOKEN")
+        backup_system.log("Optional: SOURCE_BITBUCKET_USERNAME (for git authentication)")
         sys.exit(1)
     
     # Run backup

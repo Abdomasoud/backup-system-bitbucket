@@ -43,7 +43,10 @@ load_env_config() {
     fi
     
     if [[ -n "$env_file" && -f "$env_file" ]]; then
+        # Use set -a to automatically export all variables
+        set -a
         source "$env_file"
+        set +a
         log_info "Loaded environment variables from: $env_file"
     else
         log_warning "No .env file found. Using environment variables or defaults."
@@ -92,37 +95,16 @@ init_config() {
     
     # Detect configuration format and set compatibility variables
     if [[ -n "$SOURCE_ATLASSIAN_EMAIL" && -n "$DEST_ATLASSIAN_EMAIL" ]]; then
-        # NEW DUAL-ACCOUNT FORMAT - Map to shell script variables for compatibility
-        ATLASSIAN_EMAIL="${SOURCE_ATLASSIAN_EMAIL}"
-        BITBUCKET_API_TOKEN="${SOURCE_BITBUCKET_API_TOKEN}"
-        BITBUCKET_USERNAME="${SOURCE_BITBUCKET_USERNAME:-}"
-        
-        # For single workspace compatibility, use first workspace from list
-        if [[ -n "$SOURCE_BITBUCKET_WORKSPACES" ]]; then
-            BITBUCKET_WORKSPACE=$(echo "$SOURCE_BITBUCKET_WORKSPACES" | cut -d',' -f1 | tr -d ' ')
-        else
-            BITBUCKET_WORKSPACE="${SOURCE_BITBUCKET_WORKSPACE:-}"
-        fi
-        
-        if [[ -n "$DEST_BITBUCKET_WORKSPACES" ]]; then
-            BACKUP_WORKSPACE=$(echo "$DEST_BITBUCKET_WORKSPACES" | cut -d',' -f1 | tr -d ' ')
-        else
-            BACKUP_WORKSPACE="${DEST_BITBUCKET_WORKSPACE:-}"
-        fi
-        
-        log_info "Using NEW dual-account configuration format"
+        # DUAL-ACCOUNT FORMAT DETECTED
+        log_info "Using dual-account configuration format"
         
         # Check for enhanced features that require Python version
         check_enhanced_features
     else
-        # OLD SINGLE-ACCOUNT FORMAT - Use direct variables or defaults
-        ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
-        BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"
-        BITBUCKET_USERNAME="${BITBUCKET_USERNAME:-your-bitbucket-username}"
-        BITBUCKET_WORKSPACE="${BITBUCKET_WORKSPACE:-your-source-workspace}"
-        BACKUP_WORKSPACE="${BACKUP_WORKSPACE:-your-backup-workspace}"
-        
-        log_info "Using LEGACY single-account configuration format"
+        log_error "Missing dual-account configuration!"
+        log_error "Required variables: SOURCE_ATLASSIAN_EMAIL, SOURCE_BITBUCKET_API_TOKEN, DEST_ATLASSIAN_EMAIL, DEST_BITBUCKET_API_TOKEN"
+        log_info "Please configure your .env file with dual-account format"
+        exit 1
     fi
     
     # Other settings
@@ -187,107 +169,87 @@ check_dependencies() {
 
 # Validate configuration
 validate_config() {
-    log_info "Validating configuration..."
+    log_info "Validating dual-account configuration..."
     
     local config_valid=true
     
-    # Check if using new dual-account format
-    if [[ -n "$SOURCE_ATLASSIAN_EMAIL" && -n "$DEST_ATLASSIAN_EMAIL" ]]; then
-        log_info "Detected NEW dual-account configuration format"
-        
-        if [[ -z "$SOURCE_ATLASSIAN_EMAIL" ]]; then
-            log_error "SOURCE_ATLASSIAN_EMAIL not set"
-            config_valid=false
-        fi
-        
-        if [[ -z "$SOURCE_BITBUCKET_API_TOKEN" ]]; then
-            log_error "SOURCE_BITBUCKET_API_TOKEN not set"
-            config_valid=false
-        fi
-        
-        if [[ -z "$SOURCE_BITBUCKET_WORKSPACES" && -z "$SOURCE_BITBUCKET_WORKSPACE" ]]; then
-            log_error "SOURCE_BITBUCKET_WORKSPACES or SOURCE_BITBUCKET_WORKSPACE not set"
-            config_valid=false
-        fi
-        
-        if [[ -z "$DEST_ATLASSIAN_EMAIL" ]]; then
-            log_error "DEST_ATLASSIAN_EMAIL not set"
-            config_valid=false
-        fi
-        
-        if [[ -z "$DEST_BITBUCKET_API_TOKEN" ]]; then
-            log_error "DEST_BITBUCKET_API_TOKEN not set"
-            config_valid=false
-        fi
-        
-        if [[ -z "$DEST_BITBUCKET_WORKSPACES" && -z "$DEST_BITBUCKET_WORKSPACE" ]]; then
-            log_error "DEST_BITBUCKET_WORKSPACES or DEST_BITBUCKET_WORKSPACE not set"
-            config_valid=false
-        fi
-        
-    else
-        # Old single-account format
-        log_info "Using LEGACY single-account configuration format"
-        
-        if [[ -z "$ATLASSIAN_EMAIL" || "$ATLASSIAN_EMAIL" == "your-atlassian-email@domain.com" ]]; then
-            log_error "ATLASSIAN_EMAIL not set or using default value"
-            config_valid=false
-        fi
-        
-        if [[ -z "$BITBUCKET_API_TOKEN" || "$BITBUCKET_API_TOKEN" == "your-api-token" ]]; then
-            log_error "BITBUCKET_API_TOKEN not set or using default value"
-            config_valid=false
-        fi
-        
-        if [[ -z "$BITBUCKET_WORKSPACE" || "$BITBUCKET_WORKSPACE" == "your-source-workspace" ]]; then
-            log_error "BITBUCKET_WORKSPACE not set or using default value"
-            config_valid=false
-        fi
-        
-        if [[ -z "$BACKUP_WORKSPACE" || "$BACKUP_WORKSPACE" == "your-backup-workspace" ]]; then
-            log_error "BACKUP_WORKSPACE not set or using default value"
-            config_valid=false
-        fi
+    # Check required dual-account variables
+    if [[ -z "$SOURCE_ATLASSIAN_EMAIL" ]]; then
+        log_error "SOURCE_ATLASSIAN_EMAIL not set"
+        config_valid=false
+    fi
+    
+    if [[ -z "$SOURCE_BITBUCKET_API_TOKEN" ]]; then
+        log_error "SOURCE_BITBUCKET_API_TOKEN not set"
+        config_valid=false
+    fi
+    
+    if [[ -z "$DEST_ATLASSIAN_EMAIL" ]]; then
+        log_error "DEST_ATLASSIAN_EMAIL not set"
+        config_valid=false
+    fi
+    
+    if [[ -z "$DEST_BITBUCKET_API_TOKEN" ]]; then
+        log_error "DEST_BITBUCKET_API_TOKEN not set"
+        config_valid=false
     fi
     
     if [[ "$config_valid" != true ]]; then
         log_error "Configuration validation failed!"
-        log_info "Please edit /opt/bitbucket-backup/config/.env with your credentials"
-        log_info "For enhanced features, use the Python script: python3 bitbucket-backup.py"
+        log_info "Please configure your .env file with dual-account format:"
+        log_info "  SOURCE_ATLASSIAN_EMAIL=your-source@email.com"
+        log_info "  SOURCE_BITBUCKET_API_TOKEN=source-token"
+        log_info "  DEST_ATLASSIAN_EMAIL=your-dest@email.com"
+        log_info "  DEST_BITBUCKET_API_TOKEN=dest-token"
+        log_info "For enhanced features, use: python3 bitbucket-backup.py"
         exit 1
     fi
     
-    log_success "Configuration validation passed"
+    log_success "Dual-account configuration validation passed"
 }
 
 # Test Bitbucket API connection
 test_api_connection() {
-    log_info "Testing Bitbucket API connection..."
+    log_info "Testing source account API connection..."
     
-    local response=$(curl -s -u "${ATLASSIAN_EMAIL}:${BITBUCKET_API_TOKEN}" \
+    # Test source account connection
+    local source_response=$(curl -s -u "${SOURCE_ATLASSIAN_EMAIL}:${SOURCE_BITBUCKET_API_TOKEN}" \
         -H "Accept: application/json" \
-        "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_WORKSPACE}" \
+        "https://api.bitbucket.org/2.0/user" \
         -w "%{http_code}")
     
-    local http_code="${response: -3}"
+    local source_http_code="${source_response: -3}"
     
-    if [[ "$http_code" == "200" ]]; then
-        log_success "Bitbucket API connection successful"
-        
-        # Count repositories
-        local repo_count=$(echo "${response%???}" | jq -r '.size // 0')
-        log_info "Found ${repo_count} repositories in workspace"
-        
-    elif [[ "$http_code" == "401" ]]; then
-        log_error "Authentication failed - check Atlassian email and API token"
-        exit 1
-    elif [[ "$http_code" == "404" ]]; then
-        log_error "Workspace not found - check BITBUCKET_WORKSPACE value"
+    if [[ "$source_http_code" == "200" ]]; then
+        log_success "Source account API connection successful"
+    elif [[ "$source_http_code" == "401" ]]; then
+        log_error "Source account authentication failed - check SOURCE_ATLASSIAN_EMAIL and SOURCE_BITBUCKET_API_TOKEN"
         exit 1
     else
-        log_error "API connection failed with HTTP code: $http_code"
+        log_error "Source account API connection failed with HTTP code: $source_http_code"
         exit 1
     fi
+    
+    # Test destination account connection
+    log_info "Testing destination account API connection..."
+    local dest_response=$(curl -s -u "${DEST_ATLASSIAN_EMAIL}:${DEST_BITBUCKET_API_TOKEN}" \
+        -H "Accept: application/json" \
+        "https://api.bitbucket.org/2.0/user" \
+        -w "%{http_code}")
+    
+    local dest_http_code="${dest_response: -3}"
+    
+    if [[ "$dest_http_code" == "200" ]]; then
+        log_success "Destination account API connection successful"
+    elif [[ "$dest_http_code" == "401" ]]; then
+        log_error "Destination account authentication failed - check DEST_ATLASSIAN_EMAIL and DEST_BITBUCKET_API_TOKEN"
+        exit 1
+    else
+        log_error "Destination account API connection failed with HTTP code: $dest_http_code"
+        exit 1
+    fi
+    
+    log_success "Both accounts validated successfully"
 }
 
 # Setup directory structure
@@ -383,6 +345,55 @@ should_use_python() {
     fi
 }
 
+# Export all environment variables from .env file
+export_all_env_vars() {
+    local env_file=""
+    
+    # Find the .env file
+    if [[ -f "$BACKUP_BASE_DIR/config/.env" ]]; then
+        env_file="$BACKUP_BASE_DIR/config/.env"
+    elif [[ -f "$SCRIPT_DIR/../config/.env" ]]; then
+        env_file="$SCRIPT_DIR/../config/.env"
+    elif [[ -f "/opt/bitbucket-backup/config/.env" ]]; then
+        env_file="/opt/bitbucket-backup/config/.env"
+    fi
+    
+    if [[ -n "$env_file" && -f "$env_file" ]]; then
+        log_info "📋 Exporting all variables from: $env_file"
+        
+        # Export all non-comment, non-empty lines as environment variables
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip comments and empty lines
+            if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "${line// }" ]]; then
+                continue
+            fi
+            
+            # Remove inline comments and whitespace
+            line=$(echo "$line" | sed 's/#.*//' | sed 's/[[:space:]]*$//')
+            
+            # Skip if line is empty after cleaning
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+            
+            # Export the variable if it contains =
+            if [[ "$line" == *"="* ]]; then
+                export "$line"
+                # Debug: show what we're exporting (without token values)
+                var_name=$(echo "$line" | cut -d'=' -f1)
+                if [[ "$var_name" == *"TOKEN"* ]]; then
+                    log_info "   Exported: $var_name=***HIDDEN***"
+                else
+                    log_info "   Exported: $line"
+                fi
+            fi
+        done < "$env_file"
+    else
+        log_error "Could not find .env file to export variables"
+        exit 1
+    fi
+}
+
 # Run Python script with proper environment
 run_python_script() {
     local python_script=""
@@ -402,26 +413,30 @@ run_python_script() {
     
     log_info "🐍 Using Python script for enhanced features: $python_script"
     
-    # Set up environment variables for Python script
-    export SOURCE_ATLASSIAN_EMAIL="${SOURCE_ATLASSIAN_EMAIL:-$ATLASSIAN_EMAIL}"
-    export SOURCE_BITBUCKET_API_TOKEN="${SOURCE_BITBUCKET_API_TOKEN:-$BITBUCKET_API_TOKEN}"
-    export SOURCE_BITBUCKET_USERNAME="${SOURCE_BITBUCKET_USERNAME:-$BITBUCKET_USERNAME}"
-    export SOURCE_BITBUCKET_WORKSPACE="${SOURCE_BITBUCKET_WORKSPACE:-$BITBUCKET_WORKSPACE}"
-    export SOURCE_BITBUCKET_WORKSPACES="${SOURCE_BITBUCKET_WORKSPACES:-}"
+    # Export ALL environment variables from .env file
+    export_all_env_vars
     
-    # Legacy compatibility for Python script
-    export ATLASSIAN_EMAIL="${SOURCE_ATLASSIAN_EMAIL:-$ATLASSIAN_EMAIL}"
-    export BITBUCKET_API_TOKEN="${SOURCE_BITBUCKET_API_TOKEN:-$BITBUCKET_API_TOKEN}"
-    export BITBUCKET_USERNAME="${SOURCE_BITBUCKET_USERNAME:-$BITBUCKET_USERNAME}"
-    export BITBUCKET_WORKSPACE="${SOURCE_BITBUCKET_WORKSPACE:-$BITBUCKET_WORKSPACE}"
-    export BACKUP_WORKSPACE="${DEST_BITBUCKET_WORKSPACE:-$BACKUP_WORKSPACE}"
+    # Verify critical variables are set
+    log_info "🔍 Verifying critical environment variables..."
+    if [[ -n "$SOURCE_ATLASSIAN_EMAIL" ]]; then
+        log_info "   ✅ SOURCE_ATLASSIAN_EMAIL: ${SOURCE_ATLASSIAN_EMAIL}"
+    fi
+    if [[ -n "$DEST_ATLASSIAN_EMAIL" ]]; then
+        log_info "   ✅ DEST_ATLASSIAN_EMAIL: ${DEST_ATLASSIAN_EMAIL}"
+    fi
+    if [[ -n "$SOURCE_BITBUCKET_API_TOKEN" ]]; then
+        log_info "   ✅ SOURCE_BITBUCKET_API_TOKEN: ***SET***"
+    fi
+    if [[ -n "$DEST_BITBUCKET_API_TOKEN" ]]; then
+        log_info "   ✅ DEST_BITBUCKET_API_TOKEN: ***SET***"
+    fi
     
     # Change to the directory containing the Python script
     cd "$(dirname "$python_script")"
     
     # Run Python script with the passed arguments
     case "${1:-}" in
-        --test-only)
+        --test-only|--test)
             log_info "🧪 Running Python configuration test..."
             python3 "$(basename "$python_script")" test
             ;;
@@ -476,12 +491,16 @@ main() {
             echo ""
             echo "Configuration file: /opt/bitbucket-backup/config/.env"
             echo ""
-            echo "🐍 For enhanced features, the script automatically uses Python version:"
-            echo "  • Auto-discovery of ALL workspaces"
-            echo "  • Cross-account migration"
-            echo "  • Collaboration data restoration"
+            echo "Required dual-account configuration:"
+            echo "  SOURCE_ATLASSIAN_EMAIL      - Source account email"
+            echo "  SOURCE_BITBUCKET_API_TOKEN  - Source account API token"
+            echo "  DEST_ATLASSIAN_EMAIL        - Destination account email"  
+            echo "  DEST_BITBUCKET_API_TOKEN    - Destination account API token"
             echo ""
-            echo "Shell script supports basic single-workspace backup only."
+            echo "🐍 Enhanced features (auto-delegated to Python script):"
+            echo "  • Auto-discovery of ALL workspaces"
+            echo "  • Cross-account migration with collaboration data"
+            echo "  • Issues, PRs, and wiki restoration"
             exit 0
             ;;
         "")
