@@ -1,6 +1,18 @@
 #!/bin/bash
 # Bitbucket Repository Backup Script
 # Simple & Reliable - No virtual environments needed
+#
+# 🚀 RECOMMENDED: Use the Python version for enhanced features:
+#    python3 bitbucket-backup.py
+#
+# Features available in Python version:
+# ✅ Auto-discovery of ALL workspaces & repositories
+# ✅ Dual-account migration support
+# ✅ Enhanced error reporting & troubleshooting
+# ✅ Collaboration data restoration (issues, PRs, wikis)
+# ✅ Advanced filtering and workspace mapping
+#
+# This shell script provides basic single-workspace backup functionality
 
 set -e
 
@@ -38,17 +50,80 @@ load_env_config() {
     fi
 }
 
+# Check if enhanced features are configured that require Python version
+check_enhanced_features() {
+    local enhanced_features=()
+    
+    if [[ "$AUTO_DISCOVER_ALL" == "true" ]]; then
+        enhanced_features+=("Auto-discovery of ALL workspaces")
+    fi
+    
+    if [[ "$MIGRATION_MODE" == "true" ]]; then
+        enhanced_features+=("Cross-account migration")
+    fi
+    
+    if [[ "$RESTORE_ISSUES" == "true" || "$RESTORE_WIKI" == "true" || "$RESTORE_PRS" == "true" ]]; then
+        enhanced_features+=("Collaboration data restoration")
+    fi
+    
+    if [[ -n "$SOURCE_BITBUCKET_WORKSPACES" && "$SOURCE_BITBUCKET_WORKSPACES" == *","* ]]; then
+        enhanced_features+=("Multi-workspace processing")
+    fi
+    
+    if [[ ${#enhanced_features[@]} -gt 0 ]]; then
+        log_warning "Enhanced features detected in configuration:"
+        for feature in "${enhanced_features[@]}"; do
+            echo -e "   🔥 $feature"
+        done
+        echo ""
+        log_info "🚀 For full feature support, use the Python version:"
+        echo -e "   ${BOLD}python3 bitbucket-backup.py${NC}"
+        echo ""
+        log_info "Shell script will attempt basic single-workspace backup only..."
+        echo ""
+        sleep 3
+    fi
+}
+
 # Initialize configuration variables after loading env
 init_config() {
     # Load environment first
     load_env_config
     
-    # Set configuration with loaded values or defaults
-    ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
-    BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"
-    BITBUCKET_USERNAME="${BITBUCKET_USERNAME:-your-bitbucket-username}"
-    BITBUCKET_WORKSPACE="${BITBUCKET_WORKSPACE:-your-source-workspace}"
-    BACKUP_WORKSPACE="${BACKUP_WORKSPACE:-your-backup-workspace}"
+    # Detect configuration format and set compatibility variables
+    if [[ -n "$SOURCE_ATLASSIAN_EMAIL" && -n "$DEST_ATLASSIAN_EMAIL" ]]; then
+        # NEW DUAL-ACCOUNT FORMAT - Map to shell script variables for compatibility
+        ATLASSIAN_EMAIL="${SOURCE_ATLASSIAN_EMAIL}"
+        BITBUCKET_API_TOKEN="${SOURCE_BITBUCKET_API_TOKEN}"
+        BITBUCKET_USERNAME="${SOURCE_BITBUCKET_USERNAME:-}"
+        
+        # For single workspace compatibility, use first workspace from list
+        if [[ -n "$SOURCE_BITBUCKET_WORKSPACES" ]]; then
+            BITBUCKET_WORKSPACE=$(echo "$SOURCE_BITBUCKET_WORKSPACES" | cut -d',' -f1 | tr -d ' ')
+        else
+            BITBUCKET_WORKSPACE="${SOURCE_BITBUCKET_WORKSPACE:-}"
+        fi
+        
+        if [[ -n "$DEST_BITBUCKET_WORKSPACES" ]]; then
+            BACKUP_WORKSPACE=$(echo "$DEST_BITBUCKET_WORKSPACES" | cut -d',' -f1 | tr -d ' ')
+        else
+            BACKUP_WORKSPACE="${DEST_BITBUCKET_WORKSPACE:-}"
+        fi
+        
+        log_info "Using NEW dual-account configuration format"
+        
+        # Check for enhanced features that require Python version
+        check_enhanced_features
+    else
+        # OLD SINGLE-ACCOUNT FORMAT - Use direct variables or defaults
+        ATLASSIAN_EMAIL="${ATLASSIAN_EMAIL:-your-atlassian-email@domain.com}"
+        BITBUCKET_API_TOKEN="${BITBUCKET_API_TOKEN:-your-api-token}"
+        BITBUCKET_USERNAME="${BITBUCKET_USERNAME:-your-bitbucket-username}"
+        BITBUCKET_WORKSPACE="${BITBUCKET_WORKSPACE:-your-source-workspace}"
+        BACKUP_WORKSPACE="${BACKUP_WORKSPACE:-your-backup-workspace}"
+        
+        log_info "Using LEGACY single-account configuration format"
+    fi
     
     # Other settings
     BACKUP_DIR="${BACKUP_BASE_DIR}/repositories"
@@ -116,29 +191,69 @@ validate_config() {
     
     local config_valid=true
     
-    if [[ -z "$ATLASSIAN_EMAIL" || "$ATLASSIAN_EMAIL" == "your-atlassian-email@domain.com" ]]; then
-        log_error "ATLASSIAN_EMAIL not set or using default value"
-        config_valid=false
-    fi
-    
-    if [[ -z "$BITBUCKET_API_TOKEN" || "$BITBUCKET_API_TOKEN" == "your-api-token" ]]; then
-        log_error "BITBUCKET_API_TOKEN not set or using default value"
-        config_valid=false
-    fi
-    
-    if [[ -z "$BITBUCKET_WORKSPACE" || "$BITBUCKET_WORKSPACE" == "your-source-workspace" ]]; then
-        log_error "BITBUCKET_WORKSPACE not set or using default value"
-        config_valid=false
-    fi
-    
-    if [[ -z "$BACKUP_WORKSPACE" || "$BACKUP_WORKSPACE" == "your-backup-workspace" ]]; then
-        log_error "BACKUP_WORKSPACE not set or using default value"
-        config_valid=false
+    # Check if using new dual-account format
+    if [[ -n "$SOURCE_ATLASSIAN_EMAIL" && -n "$DEST_ATLASSIAN_EMAIL" ]]; then
+        log_info "Detected NEW dual-account configuration format"
+        
+        if [[ -z "$SOURCE_ATLASSIAN_EMAIL" ]]; then
+            log_error "SOURCE_ATLASSIAN_EMAIL not set"
+            config_valid=false
+        fi
+        
+        if [[ -z "$SOURCE_BITBUCKET_API_TOKEN" ]]; then
+            log_error "SOURCE_BITBUCKET_API_TOKEN not set"
+            config_valid=false
+        fi
+        
+        if [[ -z "$SOURCE_BITBUCKET_WORKSPACES" && -z "$SOURCE_BITBUCKET_WORKSPACE" ]]; then
+            log_error "SOURCE_BITBUCKET_WORKSPACES or SOURCE_BITBUCKET_WORKSPACE not set"
+            config_valid=false
+        fi
+        
+        if [[ -z "$DEST_ATLASSIAN_EMAIL" ]]; then
+            log_error "DEST_ATLASSIAN_EMAIL not set"
+            config_valid=false
+        fi
+        
+        if [[ -z "$DEST_BITBUCKET_API_TOKEN" ]]; then
+            log_error "DEST_BITBUCKET_API_TOKEN not set"
+            config_valid=false
+        fi
+        
+        if [[ -z "$DEST_BITBUCKET_WORKSPACES" && -z "$DEST_BITBUCKET_WORKSPACE" ]]; then
+            log_error "DEST_BITBUCKET_WORKSPACES or DEST_BITBUCKET_WORKSPACE not set"
+            config_valid=false
+        fi
+        
+    else
+        # Old single-account format
+        log_info "Using LEGACY single-account configuration format"
+        
+        if [[ -z "$ATLASSIAN_EMAIL" || "$ATLASSIAN_EMAIL" == "your-atlassian-email@domain.com" ]]; then
+            log_error "ATLASSIAN_EMAIL not set or using default value"
+            config_valid=false
+        fi
+        
+        if [[ -z "$BITBUCKET_API_TOKEN" || "$BITBUCKET_API_TOKEN" == "your-api-token" ]]; then
+            log_error "BITBUCKET_API_TOKEN not set or using default value"
+            config_valid=false
+        fi
+        
+        if [[ -z "$BITBUCKET_WORKSPACE" || "$BITBUCKET_WORKSPACE" == "your-source-workspace" ]]; then
+            log_error "BITBUCKET_WORKSPACE not set or using default value"
+            config_valid=false
+        fi
+        
+        if [[ -z "$BACKUP_WORKSPACE" || "$BACKUP_WORKSPACE" == "your-backup-workspace" ]]; then
+            log_error "BACKUP_WORKSPACE not set or using default value"
+            config_valid=false
+        fi
     fi
     
     if [[ "$config_valid" != true ]]; then
         log_error "Configuration validation failed!"
         log_info "Please edit /opt/bitbucket-backup/config/.env with your credentials"
+        log_info "For enhanced features, use the Python script: python3 bitbucket-backup.py"
         exit 1
     fi
     

@@ -1,113 +1,115 @@
-# 🚀 Bitbucket Backup System - Ultra Simple & Reliable
+# 🔄 Bitbucket Migration & Backup System
 
-**No virtual environments. No complex setup. Just works.**
+Complete automated solution for Bitbucket repository backup and cross-account migration with collaboration data restoration.
 
-A bulletproof Bitbucket backup solution that automatically discovers ALL your repositories, creates mirrors, and generates organized compressed backups with retention management.
+## ✨ Key Features
 
-## ✨ What It Does
+- 🔍 **Auto-Discovery**: Automatically finds ALL accessible workspaces and repositories
+- 🔄 **Cross-Account Migration**: Migrate entire organizations between Bitbucket accounts
+- 📊 **Collaboration Data**: Restore issues, pull requests, and wiki content
+- 🏗️ **Multi-Workspace**: Process multiple workspaces with intelligent mapping
+- 🛡️ **Production Ready**: Ubuntu deployment with systemd automation
+- 📧 **Email Notifications**: SMTP alerts for backup completion and failures
 
-- 🔍 **Auto-discovers ALL repositories** in your Bitbucket workspace
-- 🪞 **Creates mirror repositories** in your backup workspace
-- 📦 **Generates .tar.gz backups** every 3 days (configurable)
-- 🗂️ **Organizes each repo in its own folder**
-- 🔄 **Maintains 5 backups per repo** (15-day retention)
-- 📊 **Saves metadata** (issues, PRs, repository info)
-- 🤖 **Fully automated** with cron integration
+## 🎯 Use Cases
 
-## 🎯 Super Simple Setup
+### Repository Backup
+- Complete backup of all repositories with metadata
+- Automated scheduled backups with retention
+- Compressed archives with timestamps
 
-### 1. **Clone & Run Setup**
+### Organization Migration  
+- Move entire Bitbucket organizations between accounts
+- Preserve collaboration data (issues, PRs, wikis)
+- Automatic workspace creation and repository mapping
+
+### Disaster Recovery
+- Full restoration capabilities
+- Metadata verification and validation
+- Quick recovery procedures
+
+## 🚀 Quick Start
+
+### 1. Clone and Deploy
 ```bash
-# On Ubuntu 22+ server (as root)
-sudo -i
 git clone https://github.com/Abdomasoud/backup-system-bitbucket.git
-cd backup-system-bitbucket
-bash setup.sh
+cd backup-system-bitbucket/final
+
+# Ubuntu production deployment
+sudo ./deploy-ubuntu.sh
 ```
 
-### 2. **Configure Credentials**
+### 2. Configure Credentials
 ```bash
-nano /opt/bitbucket-backup/config/.env
+sudo nano /opt/bitbucket-backup/config/.env
 ```
-Set your Bitbucket API token and workspace info.
 
-### 3. **Test & Run**
+Set your Bitbucket API credentials:
+```env
+# Source Account (backup from)
+SOURCE_ATLASSIAN_EMAIL=your@email.com
+SOURCE_BITBUCKET_API_TOKEN=your_api_token
+
+# Destination Account (migrate to) 
+DEST_ATLASSIAN_EMAIL=dest@email.com
+DEST_BITBUCKET_API_TOKEN=dest_api_token
+
+# Features
+AUTO_DISCOVER_ALL=true
+MIGRATION_MODE=true
+```
+
+### 3. Test Configuration
 ```bash
 cd /opt/bitbucket-backup
-./scripts/bitbucket-backup.sh --test-only  # Test connection
-./scripts/bitbucket-backup.sh --force      # First backup
+python3 bitbucket-backup.py test
 ```
 
-## 📁 Perfect Organization
-
-Creates this structure automatically:
-```
-/opt/bitbucket-backup/repositories/
-├── project-alpha/
-│   ├── project-alpha_20251002_140000.tar.gz
-│   └── project-alpha_20251005_140000.tar.gz
-├── project-beta/
-│   └── project-beta_20251002_140000.tar.gz
-└── website/
-    └── website_20251002_140000.tar.gz
-```
-
-## 🔧 Requirements
-
-- Ubuntu 22+ (or similar)
-- Root access
-- Bitbucket API token ([Get one here](https://bitbucket.org/account/settings/app-passwords/))
-
-**That's it!** No Python virtual environments, no complex dependencies.
-
-## 📋 Configuration
-
-Edit `/opt/bitbucket-backup/config/.env`:
+### 4. Run Migration
 ```bash
-ATLASSIAN_EMAIL=your-email@domain.com
-BITBUCKET_API_TOKEN=your-api-token
-BITBUCKET_WORKSPACE=your-source-workspace  
-BACKUP_WORKSPACE=your-backup-workspace
+python3 bitbucket-backup.py
 ```
 
-## 🧪 Commands
+## 📋 System Requirements
 
+- **OS**: Ubuntu 18.04+ (recommended) or any Linux distribution
+- **Python**: 3.6+ with requests, python-dotenv
+- **Tools**: git, curl, jq
+- **Access**: Root privileges for system installation
+- **API**: Bitbucket API tokens with appropriate permissions
+
+## 📖 Documentation
+
+- **[SETUP.md](SETUP.md)** - Installation, configuration, and deployment
+- **[SCRIPT-USAGE.md](SCRIPT-USAGE.md)** - Script usage, options, and examples  
+- **[DISASTER-RECOVERY.md](DISASTER-RECOVERY.md)** - Backup restoration and troubleshooting
+
+## 🔧 Support
+
+**Configuration Issues:**
 ```bash
-# Test connection
-./scripts/bitbucket-backup.sh --test-only
-
-# Force backup (ignore 3-day schedule)  
-./scripts/bitbucket-backup.sh --force
-
-# Normal scheduled run
-./scripts/bitbucket-backup.sh
-
-# Show help
-./scripts/bitbucket-backup.sh --help
+python3 bitbucket-backup.py test  # Enhanced error reporting
 ```
 
-## ⏰ Automation
-
-Add to cron for automatic backups every 3 days:
+**System Status:**
 ```bash
-crontab -e
-# Add: 0 2 */3 * * /opt/bitbucket-backup/scripts/cron-wrapper.sh >> /opt/bitbucket-backup/logs/cron.log 2>&1
+sudo /opt/bitbucket-backup/scripts/status.sh
 ```
 
-## 📖 Full Documentation
+**Live Monitoring:**
+```bash
+sudo journalctl -u bitbucket-backup.service -f
+```
 
-- **[SIMPLE-DEPLOYMENT.md](SIMPLE-DEPLOYMENT.md)** - Complete step-by-step guide
-- **[COMPLETION-SUMMARY.md](COMPLETION-SUMMARY.md)** - Technical overview
+## 🏆 Production Features
+
+- ✅ Automated scheduling (systemd timers)
+- ✅ Comprehensive logging and monitoring  
+- ✅ Email notifications and alerts
+- ✅ Backup retention and cleanup
+- ✅ Enhanced error reporting and troubleshooting
+- ✅ Security-focused configuration management
 
 ---
 
-## 🎉 Ready to Deploy!
-
-Your backup system will:
-1. **Find all repositories** in your workspace automatically
-2. **Create organized backups** in separate folders per repository  
-3. **Maintain retention** (5 backups per repo, 15-day history)
-4. **Run automatically** every 3 days via cron
-5. **Create mirror repos** in your backup workspace for disaster recovery
-
-**No more manual repository lists. No more complex setup. Just reliable, automated backups.** 🚀
+**Perfect for**: Enterprise Bitbucket migrations, automated backup systems, disaster recovery planning, and organization consolidation.
