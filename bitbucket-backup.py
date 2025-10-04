@@ -41,6 +41,12 @@ class BitbucketMigrationSystem:
         self.source_workspace = os.environ.get('SOURCE_BITBUCKET_WORKSPACE', '')
         self.dest_workspace = os.environ.get('DEST_BITBUCKET_WORKSPACE', '')
         
+        # Debug: Print the loaded workspace values
+        print(f"DEBUG: Loaded SOURCE_BITBUCKET_WORKSPACE = '{self.source_workspace}'")
+        print(f"DEBUG: Loaded DEST_BITBUCKET_WORKSPACE = '{self.dest_workspace}'")
+        print(f"DEBUG: Loaded AUTO_DISCOVER_ALL = '{os.environ.get('AUTO_DISCOVER_ALL', 'false')}'")
+        print(f"DEBUG: Script updated at 2025-10-04 11:05")
+        
         # DESTINATION ACCOUNT Configuration (account to migrate TO) 
         self.dest_email = os.environ.get('DEST_ATLASSIAN_EMAIL', '')
         self.dest_api_token = os.environ.get('DEST_BITBUCKET_API_TOKEN', '')
@@ -54,6 +60,7 @@ class BitbucketMigrationSystem:
         self.skip_existing_workspaces = os.environ.get('SKIP_EXISTING_WORKSPACES', 'true').lower() == 'true'
         self.create_missing_workspaces = os.environ.get('CREATE_MISSING_WORKSPACES', 'true').lower() == 'true'
         self.migration_batch_size = int(os.environ.get('MIGRATION_BATCH_SIZE', '5'))
+        self.skip_existing_repo_check = os.environ.get('SKIP_EXISTING_REPO_CHECK', 'false').lower() == 'true'
         
         # Set up authentication objects
         self.source_auth = (self.source_email, self.source_api_token)
@@ -149,11 +156,11 @@ class BitbucketMigrationSystem:
         url = f"{self.base_url}/{endpoint}"
         try:
             if method.upper() == 'POST':
-                response = requests.post(url, auth=self.auth, headers=self.headers, params=params, json=data)
+                response = requests.post(url, auth=self.auth, headers=self.headers, params=params, json=data, timeout=30)
             elif method.upper() == 'PUT':
-                response = requests.put(url, auth=self.auth, headers=self.headers, params=params, json=data)
+                response = requests.put(url, auth=self.auth, headers=self.headers, params=params, json=data, timeout=30)
             else:
-                response = requests.get(url, auth=self.auth, headers=self.headers, params=params)
+                response = requests.get(url, auth=self.auth, headers=self.headers, params=params, timeout=30)
             
             response.raise_for_status()
             return response.json()
@@ -190,7 +197,8 @@ class BitbucketMigrationSystem:
                     next_url, 
                     auth=self.auth, 
                     headers=self.headers,
-                    params=params if next_url == f"{self.base_url}/{endpoint}" else None
+                    params=params if next_url == f"{self.base_url}/{endpoint}" else None,
+                    timeout=30
                 )
                 response.raise_for_status()
                 
@@ -200,6 +208,10 @@ class BitbucketMigrationSystem:
                 
                 next_url = data.get('next')
                 params = None  # Clear params for subsequent requests
+                
+                # Add small delay to avoid rate limiting
+                if next_url:
+                    time.sleep(0.5)
                 
             except requests.exceptions.RequestException as e:
                 self.log(f"API error for {endpoint}: {e}")
@@ -218,14 +230,30 @@ class BitbucketMigrationSystem:
         
         return repos
     
-    def get_destination_repositories(self):
+    def get_destination_repositories(self, workspace_name=None):
         """Fetch all repositories from the DESTINATION workspace"""
-        self.log(f"🔍 Checking existing repositories in DESTINATION workspace: {self.dest_workspace}")
+        if self.skip_existing_repo_check:
+            self.log("⏭️  Skipping existing repository check (SKIP_EXISTING_REPO_CHECK=true)")
+            return {}
+            
+        target_workspace = workspace_name or self.dest_workspace
+        
+        if not target_workspace:
+            self.log("⚠️  No destination workspace specified - skipping existing repository check")
+            return {}
+            
+        self.log(f"🔍 Checking existing repositories in DESTINATION workspace: {target_workspace}")
         
         try:
-            repos = self.fetch_paginated_data_with_auth(f'repositories/{self.dest_workspace}', auth=self.dest_auth)
+            repos = self.fetch_paginated_data_with_auth(f'repositories/{target_workspace}', auth=self.dest_auth)
             self.log(f"Found {len(repos)} existing repositories in destination workspace")
             return {repo['name']: repo for repo in repos}
+        except requests.exceptions.Timeout:
+            self.log(f"⚠️  Timeout checking repositories in {target_workspace} - proceeding without existing repo check")
+            return {}
+        except requests.exceptions.RequestException as e:
+            self.log(f"⚠️  Network error checking repositories in {target_workspace}: {e}")
+            return {}
         except Exception as e:
             self.log(f"⚠️  Could not fetch destination repositories: {e}")
             return {}
@@ -244,7 +272,8 @@ class BitbucketMigrationSystem:
                     next_url, 
                     auth=auth, 
                     headers=self.headers,
-                    params=params if next_url == f"{self.base_url}/{endpoint}" else None
+                    params=params if next_url == f"{self.base_url}/{endpoint}" else None,
+                    timeout=30
                 )
                 response.raise_for_status()
                 
@@ -254,6 +283,10 @@ class BitbucketMigrationSystem:
                 
                 next_url = data.get('next')
                 params = None
+                
+                # Add small delay to avoid rate limiting
+                if next_url:
+                    time.sleep(0.5)
                 
             except requests.exceptions.RequestException as e:
                 self.log(f"API error for {endpoint}: {e}")
@@ -294,16 +327,19 @@ class BitbucketMigrationSystem:
             missing.append('SOURCE_ATLASSIAN_EMAIL')
         if not self.source_api_token:
             missing.append('SOURCE_BITBUCKET_API_TOKEN')
-        if not self.source_workspace:
-            missing.append('SOURCE_BITBUCKET_WORKSPACE')
             
         # Check destination credentials  
         if not self.dest_email:
             missing.append('DEST_ATLASSIAN_EMAIL')
         if not self.dest_api_token:
             missing.append('DEST_BITBUCKET_API_TOKEN')
-        if not self.dest_workspace:
-            missing.append('DEST_BITBUCKET_WORKSPACE')
+        
+        # Check workspace configuration (only when not using auto-discovery)
+        if not self.auto_discover_all:
+            if not self.source_workspace and not self.source_workspaces:
+                missing.append('SOURCE_BITBUCKET_WORKSPACE or SOURCE_BITBUCKET_WORKSPACES')
+            if not self.dest_workspace and not self.dest_workspaces:
+                missing.append('DEST_BITBUCKET_WORKSPACE or DEST_BITBUCKET_WORKSPACES')
             
         if missing:
             self.log(f"❌ Missing migration configuration: {', '.join(missing)}")
@@ -525,7 +561,8 @@ class BitbucketMigrationSystem:
             response = requests.get(
                 f"{self.base_url}/workspaces/{workspace_name}",
                 auth=self.dest_auth,
-                headers=self.headers
+                headers=self.headers,
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -548,7 +585,8 @@ class BitbucketMigrationSystem:
                     f"{self.base_url}/workspaces",
                     auth=self.dest_auth,
                     headers=self.headers,
-                    json=workspace_data
+                    json=workspace_data,
+                    timeout=30
                 )
                 
                 if create_response.status_code in [200, 201]:
@@ -793,23 +831,50 @@ class BitbucketMigrationSystem:
         created_workspaces = []
         workspace_mapping = {}
         
-        for source_workspace, data in complete_structure.items():
-            # Determine destination workspace name
-            dest_workspace = self.determine_destination_workspace_name(source_workspace)
-            
-            # Create workspace if needed
-            if self.create_workspace_if_needed(dest_workspace):
-                created_workspaces.append(dest_workspace)
-                workspace_mapping[source_workspace] = dest_workspace
-                self.log(f"   ✅ {source_workspace} → {dest_workspace}")
-            else:
-                self.log(f"   ❌ Failed to create workspace for: {source_workspace}")
+        # Debug logging for workspace configuration
+        self.log(f"🔍 Debug - auto_discover_all: {self.auto_discover_all}")
+        self.log(f"🔍 Debug - dest_workspace: '{self.dest_workspace}'")
+        self.log(f"🔍 Debug - condition result: {self.auto_discover_all and self.dest_workspace}")
         
-        self.log(f"🏗️  Workspace creation complete: {len(created_workspaces)}/{len(complete_structure)} successful")
+        # For auto-discovery with single destination workspace
+        if self.auto_discover_all and self.dest_workspace:
+            self.log(f"🎯 Using single destination workspace: {self.dest_workspace}")
+            
+            # Create the single destination workspace if needed
+            if self.create_workspace_if_needed(self.dest_workspace):
+                created_workspaces.append(self.dest_workspace)
+                self.log(f"   ✅ Created/verified destination workspace: {self.dest_workspace}")
+                
+                # Map all source workspaces to the single destination
+                for source_workspace in complete_structure.keys():
+                    workspace_mapping[source_workspace] = self.dest_workspace
+                    self.log(f"   📂 {source_workspace} → {self.dest_workspace}")
+            else:
+                self.log(f"   ❌ Failed to create destination workspace: {self.dest_workspace}")
+                return {}
+        else:
+            # Original logic for multiple workspace mapping
+            for source_workspace, data in complete_structure.items():
+                # Determine destination workspace name
+                dest_workspace = self.determine_destination_workspace_name(source_workspace)
+                
+                # Create workspace if needed
+                if self.create_workspace_if_needed(dest_workspace):
+                    created_workspaces.append(dest_workspace)
+                    workspace_mapping[source_workspace] = dest_workspace
+                    self.log(f"   ✅ {source_workspace} → {dest_workspace}")
+                else:
+                    self.log(f"   ❌ Failed to create workspace for: {source_workspace}")
+        
+        self.log(f"🏗️  Workspace creation complete: {len(created_workspaces)} workspace(s) ready")
         return workspace_mapping
     
     def determine_destination_workspace_name(self, source_workspace):
         """Determine the destination workspace name with intelligent naming"""
+        # For auto-discovery with single destination workspace, use dest_workspace
+        if self.auto_discover_all and self.dest_workspace:
+            return self.dest_workspace
+        
         # Check explicit workspace mapping first
         if hasattr(self, 'workspace_mapping') and source_workspace in self.workspace_mapping:
             return self.workspace_mapping[source_workspace]
@@ -836,9 +901,15 @@ class BitbucketMigrationSystem:
                 repo['workspace'] = workspace_slug
                 repo['auto_discovered'] = True
                 
-                # Set destination workspace if in migration mode
-                if self.migration_mode and hasattr(self, 'discovered_workspace_mapping'):
-                    repo['dest_workspace'] = self.discovered_workspace_mapping.get(workspace_slug, workspace_slug)
+                # Set destination workspace for migration mode
+                if self.migration_mode:
+                    # For auto-discovery with single destination, use dest_workspace
+                    if self.auto_discover_all and self.dest_workspace:
+                        repo['dest_workspace'] = self.dest_workspace
+                    elif hasattr(self, 'discovered_workspace_mapping'):
+                        repo['dest_workspace'] = self.discovered_workspace_mapping.get(workspace_slug, workspace_slug)
+                    else:
+                        repo['dest_workspace'] = self.determine_destination_workspace_name(workspace_slug)
                 
                 repositories.append(repo)
         
@@ -902,9 +973,21 @@ class BitbucketMigrationSystem:
             'backup_type': 'comprehensive'
         }
         
+        # Determine workspace for this repository - handle both string and dict formats
+        workspace_info = repo.get('workspace', {})
+        if isinstance(workspace_info, str):
+            # Auto-discovery mode sets workspace as string
+            repo_workspace = workspace_info
+        elif isinstance(workspace_info, dict):
+            # Standard API format has workspace as dict with slug
+            repo_workspace = workspace_info.get('slug', 'unknown')
+        else:
+            # Fallback to extracting from full_name or using source_workspace
+            repo_workspace = repo.get('full_name', '/').split('/')[0] if repo.get('full_name') else self.source_workspace or 'unknown'
+        
         # Fetch pull requests
         try:
-            prs = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/pullrequests', 
+            prs = self.fetch_paginated_data(f'repositories/{repo_workspace}/{repo_name}/pullrequests', 
                                           {'state': 'MERGED,OPEN,DECLINED,SUPERSEDED'})
             metadata['pull_requests'] = prs
             metadata['total_prs'] = len(prs)
@@ -915,7 +998,7 @@ class BitbucketMigrationSystem:
         
         # Fetch issues
         try:
-            issues = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/issues')
+            issues = self.fetch_paginated_data(f'repositories/{repo_workspace}/{repo_name}/issues')
             metadata['issues'] = issues
             metadata['total_issues'] = len(issues)
             self.log(f"  - Fetched {len(issues)} issues")
@@ -925,7 +1008,7 @@ class BitbucketMigrationSystem:
         
         # Fetch branches
         try:
-            branches = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/refs/branches')
+            branches = self.fetch_paginated_data(f'repositories/{repo_workspace}/{repo_name}/refs/branches')
             metadata['branches'] = branches
             metadata['total_branches'] = len(branches)
             self.log(f"  - Fetched {len(branches)} branches")
@@ -935,7 +1018,7 @@ class BitbucketMigrationSystem:
         
         # Fetch tags
         try:
-            tags = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/refs/tags')
+            tags = self.fetch_paginated_data(f'repositories/{repo_workspace}/{repo_name}/refs/tags')
             metadata['tags'] = tags
             metadata['total_tags'] = len(tags)
             self.log(f"  - Fetched {len(tags)} tags")
@@ -945,7 +1028,7 @@ class BitbucketMigrationSystem:
         
         # Fetch repository permissions
         try:
-            permissions = self.fetch_repository_permissions(repo_name)
+            permissions = self.fetch_repository_permissions(repo_name, repo_workspace)
             metadata['permissions'] = permissions
             metadata['total_permissions'] = len(permissions)
             self.log(f"  - Fetched {len(permissions)} permission entries")
@@ -955,7 +1038,7 @@ class BitbucketMigrationSystem:
         
         # Fetch repository wiki (if exists)
         try:
-            wiki_data = self.fetch_repository_wiki(repo_name)
+            wiki_data = self.fetch_repository_wiki(repo_name, repo_workspace)
             metadata['wiki'] = wiki_data
             metadata['wiki_pages_count'] = len(wiki_data.get('pages', [])) if wiki_data else 0
             self.log(f"  - Fetched wiki with {metadata['wiki_pages_count']} pages")
@@ -965,7 +1048,7 @@ class BitbucketMigrationSystem:
         
         # Fetch repository settings and configuration
         try:
-            repo_settings = self.fetch_repository_settings(repo_name)
+            repo_settings = self.fetch_repository_settings(repo_name, repo_workspace)
             metadata['repository_settings'] = repo_settings
             self.log(f"  - Fetched repository settings and configuration")
         except Exception as e:
@@ -974,7 +1057,7 @@ class BitbucketMigrationSystem:
         
         # Fetch branch permissions/restrictions
         try:
-            branch_restrictions = self.fetch_branch_restrictions(repo_name)
+            branch_restrictions = self.fetch_branch_restrictions(repo_name, repo_workspace)
             metadata['branch_restrictions'] = branch_restrictions
             metadata['total_branch_restrictions'] = len(branch_restrictions)
             self.log(f"  - Fetched {len(branch_restrictions)} branch restrictions")
@@ -984,7 +1067,7 @@ class BitbucketMigrationSystem:
         
         # Fetch webhooks
         try:
-            webhooks = self.fetch_repository_webhooks(repo_name)
+            webhooks = self.fetch_repository_webhooks(repo_name, repo_workspace)
             metadata['webhooks'] = webhooks
             metadata['total_webhooks'] = len(webhooks)
             self.log(f"  - Fetched {len(webhooks)} webhooks")
@@ -994,7 +1077,7 @@ class BitbucketMigrationSystem:
         
         # Fetch deploy keys
         try:
-            deploy_keys = self.fetch_deploy_keys(repo_name)
+            deploy_keys = self.fetch_deploy_keys(repo_name, repo_workspace)
             metadata['deploy_keys'] = deploy_keys
             metadata['total_deploy_keys'] = len(deploy_keys)
             self.log(f"  - Fetched {len(deploy_keys)} deploy keys")
@@ -1009,14 +1092,15 @@ class BitbucketMigrationSystem:
         
         return metadata_file
     
-    def fetch_repository_permissions(self, repo_name):
+    def fetch_repository_permissions(self, repo_name, workspace=None):
         """Fetch repository access permissions"""
+        workspace = workspace or self.source_workspace or 'unknown'
         permissions_data = []
         
         # Fetch repository privileges (user/team permissions)
         try:
             # Get repository privileges
-            privileges = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/permissions-config/users')
+            privileges = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/permissions-config/users')
             for privilege in privileges:
                 permissions_data.append({
                     'type': 'user_permission',
@@ -1026,7 +1110,7 @@ class BitbucketMigrationSystem:
                 })
             
             # Get team permissions
-            team_privileges = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/permissions-config/teams')
+            team_privileges = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/permissions-config/teams')
             for privilege in team_privileges:
                 permissions_data.append({
                     'type': 'team_permission',
@@ -1040,11 +1124,12 @@ class BitbucketMigrationSystem:
             
         return permissions_data
     
-    def fetch_repository_wiki(self, repo_name):
+    def fetch_repository_wiki(self, repo_name, workspace=None):
         """Fetch repository wiki content"""
+        workspace = workspace or self.source_workspace or 'unknown'
         try:
             # Check if wiki exists and is enabled
-            wiki_info = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}')
+            wiki_info = self.make_api_request(f'repositories/{workspace}/{repo_name}')
             
             if not wiki_info or not wiki_info.get('has_wiki', False):
                 return None
@@ -1057,7 +1142,7 @@ class BitbucketMigrationSystem:
             
             # Try to get wiki pages (this endpoint might not be available for all repos)
             try:
-                wiki_pages = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/wiki')
+                wiki_pages = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/wiki')
                 
                 for page in wiki_pages:
                     page_data = {
@@ -1082,13 +1167,14 @@ class BitbucketMigrationSystem:
             self.log(f"Error checking wiki status: {e}")
             return None
     
-    def fetch_repository_settings(self, repo_name):
+    def fetch_repository_settings(self, repo_name, workspace=None):
         """Fetch comprehensive repository settings"""
+        workspace = workspace or self.source_workspace or 'unknown'
         settings = {}
         
         try:
             # Get main repository info (includes many settings)
-            repo_info = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}')
+            repo_info = self.make_api_request(f'repositories/{workspace}/{repo_name}')
             if repo_info:
                 settings.update({
                     'is_private': repo_info.get('is_private', False),
@@ -1106,7 +1192,7 @@ class BitbucketMigrationSystem:
             
             # Get repository configuration
             try:
-                repo_config = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}/src/HEAD/.gitignore')
+                repo_config = self.make_api_request(f'repositories/{workspace}/{repo_name}/src/HEAD/.gitignore')
                 if repo_config:
                     settings['gitignore_exists'] = True
                 else:
@@ -1116,7 +1202,7 @@ class BitbucketMigrationSystem:
             
             # Try to get branch model (Git Flow settings)
             try:
-                branch_model = self.make_api_request(f'repositories/{self.bitbucket_workspace}/{repo_name}/branching-model')
+                branch_model = self.make_api_request(f'repositories/{workspace}/{repo_name}/branching-model')
                 settings['branch_model'] = branch_model
             except:
                 settings['branch_model'] = None
@@ -1126,10 +1212,11 @@ class BitbucketMigrationSystem:
         
         return settings
     
-    def fetch_branch_restrictions(self, repo_name):
+    def fetch_branch_restrictions(self, repo_name, workspace=None):
         """Fetch branch permissions and restrictions"""
+        workspace = workspace or self.source_workspace or 'unknown'
         try:
-            restrictions = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/branch-restrictions')
+            restrictions = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/branch-restrictions')
             
             # Process and clean up restrictions data
             processed_restrictions = []
@@ -1153,10 +1240,11 @@ class BitbucketMigrationSystem:
             self.log(f"Error fetching branch restrictions: {e}")
             return []
     
-    def fetch_repository_webhooks(self, repo_name):
+    def fetch_repository_webhooks(self, repo_name, workspace=None):
         """Fetch repository webhooks"""
+        workspace = workspace or self.source_workspace or 'unknown'
         try:
-            webhooks = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/hooks')
+            webhooks = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/hooks')
             
             # Process webhook data (remove sensitive info like secrets)
             processed_webhooks = []
@@ -1180,10 +1268,11 @@ class BitbucketMigrationSystem:
             self.log(f"Error fetching webhooks: {e}")
             return []
     
-    def fetch_deploy_keys(self, repo_name):
+    def fetch_deploy_keys(self, repo_name, workspace=None):
         """Fetch repository deploy keys"""
+        workspace = workspace or self.source_workspace or 'unknown'
         try:
-            deploy_keys = self.fetch_paginated_data(f'repositories/{self.bitbucket_workspace}/{repo_name}/deploy-keys')
+            deploy_keys = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/deploy-keys')
             
             # Process deploy keys (remove private key data for security)
             processed_keys = []
@@ -1240,8 +1329,8 @@ class BitbucketMigrationSystem:
             base_url = clone_url.replace('https://', '')
         
         # Use username instead of email for git authentication (emails have @ symbols)
-        username = self.bitbucket_username if self.bitbucket_username else self.bitbucket_workspace
-        auth_url = f'https://{username}:{self.bitbucket_api_token}@{base_url}'
+        username = self.source_username if self.source_username else self.source_workspace or 'unknown'
+        auth_url = f'https://{username}:{self.source_api_token}@{base_url}'
         
         # Debug logging
         self.log(f"Debug - Original URL: {clone_url}")
@@ -1278,9 +1367,26 @@ class BitbucketMigrationSystem:
             self.log(f"❌ Error cloning {repo_name}: {e}")
             return None
     
-    def create_migrated_repository(self, repo, existing_dest_repos=None):
+    def create_migrated_repository(self, repo, existing_dest_repos=None, dest_workspace=None):
         """Create repository in DESTINATION workspace for migration"""
         repo_name = repo['name']
+        
+        # Determine destination workspace
+        target_workspace = dest_workspace or self.dest_workspace
+        if not target_workspace:
+            # For auto-discovery, extract from source repo - handle both string and dict formats
+            workspace_info = repo.get('workspace', {})
+            if isinstance(workspace_info, str):
+                # Auto-discovery mode sets workspace as string
+                source_workspace = workspace_info
+            elif isinstance(workspace_info, dict):
+                # Standard API format has workspace as dict with slug
+                source_workspace = workspace_info.get('slug', 'unknown')
+            else:
+                # Fallback to extracting from full_name
+                source_workspace = repo.get('full_name', '/').split('/')[0] if repo.get('full_name') else 'unknown'
+            
+            target_workspace = self.determine_destination_workspace_name(source_workspace)
         
         # Determine target repository name
         if self.preserve_repo_names:
@@ -1288,7 +1394,7 @@ class BitbucketMigrationSystem:
         else:
             target_name = f"{self.repo_name_prefix}{repo_name}"
         
-        self.log(f"🔄 Creating repository in destination: {target_name}")
+        self.log(f"🔄 Creating repository in destination: {target_workspace}/{target_name}")
         
         # Check if repository already exists in destination
         if existing_dest_repos and target_name in existing_dest_repos:
@@ -1298,10 +1404,18 @@ class BitbucketMigrationSystem:
             else:
                 self.log(f"⚠️  Repository {target_name} already exists but SKIP_EXISTING_REPOS=false")
         
-        # Copy repository settings from source
+        # Copy repository settings from source - handle both string and dict formats
+        workspace_info = repo.get('workspace', {})
+        if isinstance(workspace_info, str):
+            source_workspace_name = workspace_info
+        elif isinstance(workspace_info, dict):
+            source_workspace_name = workspace_info.get('slug', 'unknown')
+        else:
+            source_workspace_name = repo.get('full_name', '/').split('/')[0] if repo.get('full_name') else 'unknown'
+            
         repo_data = {
             "name": target_name,
-            "description": repo.get('description', f"Migrated from {self.source_workspace}/{repo_name}"),
+            "description": repo.get('description', f"Migrated from {source_workspace_name}/{repo_name}"),
             "is_private": repo.get('is_private', True),
             "fork_policy": repo.get('fork_policy', 'no_public_forks'),
             "has_issues": repo.get('has_issues', True),
@@ -1313,10 +1427,11 @@ class BitbucketMigrationSystem:
         try:
             # Create repository in destination workspace using destination auth
             response = requests.post(
-                f"{self.base_url}/repositories/{self.dest_workspace}/{target_name}",
+                f"{self.base_url}/repositories/{target_workspace}/{target_name}",
                 auth=self.dest_auth,
                 headers=self.headers,
-                json=repo_data
+                json=repo_data,
+                timeout=30
             )
             response.raise_for_status()
             
@@ -2374,8 +2489,13 @@ Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M
         
         # Get existing repositories in DESTINATION (for migration mode)
         existing_dest_repos = {}
-        if self.migration_mode:
+        if self.migration_mode and not self.auto_discover_all:
+            # Only check destination repositories for single-workspace migration
             existing_dest_repos = self.get_destination_repositories()
+        elif self.migration_mode and self.auto_discover_all:
+            # For auto-discovery mode, we'll check existing repos per workspace during processing
+            self.log("🔍 Auto-discovery mode: will check existing repositories per workspace during processing")
+            existing_dest_repos = {}
         
         # Update statistics
         self.backup_stats['total_repos'] = len(repositories)
@@ -2421,7 +2541,25 @@ Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M
                 local_repo_path = self.clone_repository(repo)
                 
                 # 3. Create mirror repository
-                mirror_repo = self.create_mirror_repository(repo)
+                if self.migration_mode and self.auto_discover_all:
+                    # For auto-discovery, use the destination workspace that was set during flattening
+                    dest_workspace_name = repo.get('dest_workspace')
+                    if not dest_workspace_name:
+                        # Fallback if dest_workspace wasn't set properly
+                        workspace_info = repo.get('workspace', {})
+                        if isinstance(workspace_info, str):
+                            source_workspace = workspace_info
+                        elif isinstance(workspace_info, dict):
+                            source_workspace = workspace_info.get('slug', 'unknown')
+                        else:
+                            source_workspace = repo.get('full_name', '/').split('/')[0] if repo.get('full_name') else 'unknown'
+                        dest_workspace_name = self.determine_destination_workspace_name(source_workspace)
+                    
+                    workspace_existing_repos = self.get_destination_repositories(dest_workspace_name)
+                    mirror_repo = self.create_migrated_repository(repo, workspace_existing_repos, dest_workspace_name)
+                else:
+                    # For single-workspace migration, use pre-fetched existing repos
+                    mirror_repo = self.create_migrated_repository(repo, existing_dest_repos)
                 
                 # 4. Push to mirror
                 if local_repo_path and mirror_repo:
@@ -2519,6 +2657,7 @@ MIGRATION SETTINGS:
 - PRESERVE_REPO_NAMES: Keep original names (true/false, default: true)
 - REPO_NAME_PREFIX: Optional prefix for migrated repos (default: "")
 - SKIP_EXISTING_REPOS: Skip existing repos (true/false, default: true)
+- SKIP_EXISTING_REPO_CHECK: Skip existing repo check (for troubleshooting, default: false)
 - MIGRATION_BATCH_SIZE: Concurrent repo processing (default: 5)
 
 📦 BACKUP CONFIGURATION:
