@@ -94,6 +94,14 @@ class BitbucketMigrationSystem:
         self.restore_metadata_webhooks = os.environ.get('RESTORE_WEBHOOKS', 'false').lower() == 'true'
         self.restore_metadata_deploy_keys = os.environ.get('RESTORE_DEPLOY_KEYS', 'false').lower() == 'true'
         
+        # Auto-discovery settings
+        self.auto_discover_all = os.environ.get('AUTO_DISCOVER_ALL', 'false').lower() == 'true'
+        self.workspace_include_patterns = self.parse_filter_patterns(os.environ.get('WORKSPACE_INCLUDE_PATTERNS', ''))
+        self.workspace_exclude_patterns = self.parse_filter_patterns(os.environ.get('WORKSPACE_EXCLUDE_PATTERNS', ''))
+        self.repo_include_patterns = self.parse_filter_patterns(os.environ.get('REPO_INCLUDE_PATTERNS', ''))
+        self.repo_exclude_patterns = self.parse_filter_patterns(os.environ.get('REPO_EXCLUDE_PATTERNS', ''))
+        self.auto_discovery_max_repos = int(os.environ.get('AUTO_DISCOVERY_MAX_REPOS', '1000'))
+        
         # User mapping for cross-account migration
         self.user_mapping = self.load_user_mapping()
         
@@ -167,6 +175,12 @@ class BitbucketMigrationSystem:
         except Exception as e:
             self.log(f"⚠️ Error loading user mapping: {e}")
             return {}
+    
+    def parse_filter_patterns(self, patterns_str):
+        """Parse comma-separated filter patterns"""
+        if not patterns_str or patterns_str.strip() == '':
+            return []
+        return [pattern.strip() for pattern in patterns_str.split(',') if pattern.strip()]
     
     def fetch_paginated_data(self, endpoint, params=None):
         """Fetch all pages of data from Bitbucket API"""
@@ -428,6 +442,328 @@ class BitbucketMigrationSystem:
             self.log(f"❌ Error with workspace operations: {e}")
             return False
     
+    # ========== AUTO-DISCOVERY METHODS ==========
+    
+    def discover_all_workspaces(self):
+        """Automatically discover all workspaces accessible to the source account"""
+        self.log("🔍 Auto-discovering all accessible workspaces...")
+        
+        try:
+            # Get all workspaces the authenticated user has access to
+            workspaces_data = self.fetch_paginated_data('workspaces', {'role': 'member'})
+            
+            if not workspaces_data:
+                self.log("❌ No workspaces found or API error")
+                return []
+            
+            discovered_workspaces = []
+            workspace_details = {}
+            
+            for workspace in workspaces_data:
+                ws_slug = workspace.get('slug', '')
+                ws_name = workspace.get('name', ws_slug)
+                ws_uuid = workspace.get('uuid', '')
+                
+                # Get detailed workspace information
+                workspace_info = {
+                    'slug': ws_slug,
+                    'name': ws_name,
+                    'uuid': ws_uuid,
+                    'is_private': workspace.get('is_private', True),
+                    'type': workspace.get('type', 'workspace'),
+                    'links': workspace.get('links', {}),
+                    'permission': workspace.get('permission', 'unknown'),
+                    'created_on': workspace.get('created_on', ''),
+                }
+                
+                discovered_workspaces.append(ws_slug)
+                workspace_details[ws_slug] = workspace_info
+                
+                self.log(f"   🏢 Found workspace: {ws_name} ({ws_slug}) - Permission: {workspace_info['permission']}")
+            
+            self.log(f"✅ Discovered {len(discovered_workspaces)} workspaces")
+            
+            # Store workspace details for later use
+            self.discovered_workspace_details = workspace_details
+            
+            return discovered_workspaces
+            
+        except Exception as e:
+            self.log(f"❌ Error discovering workspaces: {e}")
+            return []
+    
+    def discover_all_repositories_in_workspaces(self, workspaces_list):
+        """Discover all repositories across multiple workspaces"""
+        self.log(f"🔍 Auto-discovering repositories in {len(workspaces_list)} workspaces...")
+        
+        all_repositories = {}
+        total_repo_count = 0
+        
+        for workspace_slug in workspaces_list:
+            try:
+                self.log(f"   📂 Scanning workspace: {workspace_slug}")
+                
+                # Get all repositories in this workspace
+                repos_data = self.fetch_paginated_data(f'repositories/{workspace_slug}')
+                
+                if repos_data:
+                    workspace_repos = []
+                    for repo in repos_data:
+                        repo_info = {
+                            'name': repo.get('name', ''),
+                            'full_name': repo.get('full_name', ''),
+                            'uuid': repo.get('uuid', ''),
+                            'description': repo.get('description', ''),
+                            'is_private': repo.get('is_private', True),
+                            'scm': repo.get('scm', 'git'),
+                            'language': repo.get('language', ''),
+                            'size': repo.get('size', 0),
+                            'has_issues': repo.get('has_issues', False),
+                            'has_wiki': repo.get('has_wiki', False),
+                            'created_on': repo.get('created_on', ''),
+                            'updated_on': repo.get('updated_on', ''),
+                            'links': repo.get('links', {}),
+                            'workspace': workspace_slug,
+                            'auto_discovered': True
+                        }
+                        workspace_repos.append(repo_info)
+                    
+                    all_repositories[workspace_slug] = {
+                        'workspace_info': self.discovered_workspace_details.get(workspace_slug, {}),
+                        'repositories': workspace_repos,
+                        'repo_count': len(workspace_repos)
+                    }
+                    
+                    total_repo_count += len(workspace_repos)
+                    self.log(f"      📦 Found {len(workspace_repos)} repositories in {workspace_slug}")
+                    
+                    # Log a few example repos
+                    for i, repo in enumerate(workspace_repos[:3]):
+                        self.log(f"         - {repo['name']} ({repo['language']}) - {repo['scm']}")
+                    if len(workspace_repos) > 3:
+                        self.log(f"         ... and {len(workspace_repos) - 3} more repositories")
+                else:
+                    self.log(f"      📦 No repositories found in {workspace_slug}")
+                    all_repositories[workspace_slug] = {
+                        'workspace_info': self.discovered_workspace_details.get(workspace_slug, {}),
+                        'repositories': [],
+                        'repo_count': 0
+                    }
+                    
+            except Exception as e:
+                self.log(f"      ❌ Error scanning workspace {workspace_slug}: {e}")
+                all_repositories[workspace_slug] = {
+                    'workspace_info': self.discovered_workspace_details.get(workspace_slug, {}),
+                    'repositories': [],
+                    'repo_count': 0,
+                    'error': str(e)
+                }
+        
+        self.log(f"✅ Total discovery complete: {total_repo_count} repositories across {len(workspaces_list)} workspaces")
+        return all_repositories
+    
+    def auto_discover_complete_structure(self):
+        """Complete auto-discovery: find all workspaces and repositories"""
+        self.log("🚀 Starting COMPLETE AUTO-DISCOVERY of Bitbucket structure...")
+        
+        # Step 1: Discover all workspaces
+        discovered_workspaces = self.discover_all_workspaces()
+        
+        if not discovered_workspaces:
+            self.log("❌ No workspaces discovered - cannot proceed with auto-discovery")
+            return None
+        
+        # Step 2: Apply workspace filters if configured
+        filtered_workspaces = self.apply_workspace_filters(discovered_workspaces)
+        
+        # Step 3: Discover all repositories in filtered workspaces
+        complete_structure = self.discover_all_repositories_in_workspaces(filtered_workspaces)
+        
+        # Step 4: Generate discovery summary
+        self.log_discovery_summary(complete_structure)
+        
+        return complete_structure
+    
+    def apply_workspace_filters(self, discovered_workspaces):
+        """Apply filtering rules to discovered workspaces"""
+        if not hasattr(self, 'workspace_filters') or not self.workspace_filters:
+            self.log("   ℹ️  No workspace filters configured - using all discovered workspaces")
+            return discovered_workspaces
+        
+        filtered = []
+        for workspace in discovered_workspaces:
+            # Check inclusion filters
+            if self.workspace_include_patterns:
+                include_match = any(pattern in workspace for pattern in self.workspace_include_patterns)
+                if not include_match:
+                    self.log(f"   ⏭️  Skipping {workspace} - doesn't match include patterns")
+                    continue
+            
+            # Check exclusion filters
+            if self.workspace_exclude_patterns:
+                exclude_match = any(pattern in workspace for pattern in self.workspace_exclude_patterns)
+                if exclude_match:
+                    self.log(f"   ⏭️  Skipping {workspace} - matches exclude patterns")
+                    continue
+            
+            filtered.append(workspace)
+            self.log(f"   ✅ Including workspace: {workspace}")
+        
+        self.log(f"📋 Workspace filtering: {len(discovered_workspaces)} discovered → {len(filtered)} selected")
+        return filtered
+    
+    def log_discovery_summary(self, complete_structure):
+        """Log a comprehensive summary of what was discovered"""
+        self.log("\n" + "="*60)
+        self.log("📊 AUTO-DISCOVERY SUMMARY")
+        self.log("="*60)
+        
+        total_workspaces = len(complete_structure)
+        total_repos = sum(ws_data['repo_count'] for ws_data in complete_structure.values())
+        
+        self.log(f"🏢 Total Workspaces: {total_workspaces}")
+        self.log(f"📦 Total Repositories: {total_repos}")
+        
+        for workspace, data in complete_structure.items():
+            repo_count = data['repo_count']
+            workspace_info = data.get('workspace_info', {})
+            permission = workspace_info.get('permission', 'unknown')
+            
+            self.log(f"\n📂 {workspace} ({permission} access)")
+            self.log(f"   📦 Repositories: {repo_count}")
+            
+            if repo_count > 0:
+                # Show language breakdown
+                languages = {}
+                private_count = 0
+                has_issues_count = 0
+                has_wiki_count = 0
+                
+                for repo in data['repositories']:
+                    lang = repo.get('language') or 'Unknown'
+                    languages[lang] = languages.get(lang, 0) + 1
+                    if repo.get('is_private'):
+                        private_count += 1
+                    if repo.get('has_issues'):
+                        has_issues_count += 1
+                    if repo.get('has_wiki'):
+                        has_wiki_count += 1
+                
+                self.log(f"   🔒 Private repos: {private_count}/{repo_count}")
+                self.log(f"   🎫 With issues: {has_issues_count}/{repo_count}")
+                self.log(f"   📖 With wiki: {has_wiki_count}/{repo_count}")
+                
+                # Show top languages
+                if languages:
+                    sorted_langs = sorted(languages.items(), key=lambda x: x[1], reverse=True)[:3]
+                    lang_summary = ", ".join([f"{lang}: {count}" for lang, count in sorted_langs])
+                    self.log(f"   💻 Languages: {lang_summary}")
+        
+        self.log("="*60)
+        self.log(f"🎯 Ready to migrate {total_repos} repositories from {total_workspaces} workspaces")
+        self.log("="*60 + "\n")
+    
+    def create_destination_workspace_structure(self, complete_structure):
+        """Create the complete workspace structure in destination account"""
+        self.log("🏗️  Creating destination workspace structure...")
+        
+        created_workspaces = []
+        workspace_mapping = {}
+        
+        for source_workspace, data in complete_structure.items():
+            # Determine destination workspace name
+            dest_workspace = self.determine_destination_workspace_name(source_workspace)
+            
+            # Create workspace if needed
+            if self.create_workspace_if_needed(dest_workspace):
+                created_workspaces.append(dest_workspace)
+                workspace_mapping[source_workspace] = dest_workspace
+                self.log(f"   ✅ {source_workspace} → {dest_workspace}")
+            else:
+                self.log(f"   ❌ Failed to create workspace for: {source_workspace}")
+        
+        self.log(f"🏗️  Workspace creation complete: {len(created_workspaces)}/{len(complete_structure)} successful")
+        return workspace_mapping
+    
+    def determine_destination_workspace_name(self, source_workspace):
+        """Determine the destination workspace name with intelligent naming"""
+        # Check explicit workspace mapping first
+        if hasattr(self, 'workspace_mapping') and source_workspace in self.workspace_mapping:
+            return self.workspace_mapping[source_workspace]
+        
+        # Apply workspace name prefix if configured
+        if hasattr(self, 'workspace_name_prefix') and self.workspace_name_prefix:
+            return f"{self.workspace_name_prefix}{source_workspace}"
+        
+        # Default: use same name (for same-account scenarios or when no prefix configured)
+        return source_workspace
+    
+    def flatten_discovered_structure_to_repositories(self, complete_structure):
+        """Flatten auto-discovered structure into a list of repositories for processing"""
+        repositories = []
+        
+        for workspace_slug, workspace_data in complete_structure.items():
+            workspace_repos = workspace_data.get('repositories', [])
+            
+            # Apply repository filters if configured
+            filtered_repos = self.apply_repository_filters(workspace_repos, workspace_slug)
+            
+            for repo in filtered_repos:
+                # Ensure repository has workspace information for migration
+                repo['workspace'] = workspace_slug
+                repo['auto_discovered'] = True
+                
+                # Set destination workspace if in migration mode
+                if self.migration_mode and hasattr(self, 'discovered_workspace_mapping'):
+                    repo['dest_workspace'] = self.discovered_workspace_mapping.get(workspace_slug, workspace_slug)
+                
+                repositories.append(repo)
+        
+        self.log(f"📋 Flattened structure: {len(repositories)} repositories selected for processing")
+        return repositories
+    
+    def flatten_workspace_repositories(self, workspace_repositories):
+        """Flatten multi-workspace repository structure for processing"""
+        repositories = []
+        for workspace, data in workspace_repositories.items():
+            for repo in data.get('repositories', []):
+                repo['workspace'] = workspace
+                repositories.append(repo)
+        return repositories
+    
+    def apply_repository_filters(self, repositories, workspace_slug):
+        """Apply filtering rules to repositories within a workspace"""
+        if not self.repo_include_patterns and not self.repo_exclude_patterns:
+            return repositories
+        
+        filtered = []
+        for repo in repositories:
+            repo_name = repo.get('name', '')
+            
+            # Check inclusion filters
+            if self.repo_include_patterns:
+                include_match = any(pattern in repo_name for pattern in self.repo_include_patterns)
+                if not include_match:
+                    continue
+            
+            # Check exclusion filters  
+            if self.repo_exclude_patterns:
+                exclude_match = any(pattern in repo_name for pattern in self.repo_exclude_patterns)
+                if exclude_match:
+                    continue
+            
+            # Check max repos limit
+            if len(filtered) >= self.auto_discovery_max_repos:
+                self.log(f"⚠️ Reached max repository limit ({self.auto_discovery_max_repos}) in {workspace_slug}")
+                break
+                
+            filtered.append(repo)
+        
+        if len(filtered) != len(repositories):
+            self.log(f"   🔍 Repository filtering in {workspace_slug}: {len(repositories)} found → {len(filtered)} selected")
+        
+        return filtered
+
     def backup_repository_metadata(self, repo):
         """Backup comprehensive metadata for a single repository"""
         repo_name = repo['name']
@@ -1827,7 +2163,17 @@ Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M
     
     def backup_all_repositories(self):
         """Main function to backup and migrate all repositories"""
-        if self.migration_mode:
+        if self.auto_discover_all:
+            self.log("🚀 Starting Bitbucket AUTO-DISCOVERY MIGRATION process...")
+            self.log("🔍 Will automatically discover ALL workspaces and repositories")
+            self.log(f"📤 SOURCE ACCOUNT: {self.source_email}")
+            if self.migration_mode:
+                self.log(f"📥 DESTINATION ACCOUNT: {self.dest_email}")
+            if self.workspace_include_patterns:
+                self.log(f"   🎯 Include patterns: {', '.join(self.workspace_include_patterns)}")
+            if self.workspace_exclude_patterns:
+                self.log(f"   🚫 Exclude patterns: {', '.join(self.workspace_exclude_patterns)}")
+        elif self.migration_mode:
             if self.multi_workspace_mode:
                 self.log("🚀 Starting Bitbucket MULTI-WORKSPACE MIGRATION process...")
                 workspace_pairs = self.get_workspace_pairs()
@@ -1845,18 +2191,48 @@ Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M
         if not self.validate_migration_config():
             return False
         
-        # Get repositories (single or multi-workspace)
-        if self.multi_workspace_mode:
+        # Determine repository discovery method
+        repositories = []
+        workspace_repositories = {}
+        
+        if self.auto_discover_all:
+            # AUTO-DISCOVERY MODE: Find all workspaces and repositories automatically
+            self.log("🔍 AUTO-DISCOVERY MODE: Discovering all accessible workspaces and repositories...")
+            
+            complete_structure = self.auto_discover_complete_structure()
+            if not complete_structure:
+                self.log("❌ Auto-discovery failed - no workspaces or repositories found")
+                self.backup_stats['end_time'] = datetime.now()
+                self.backup_stats['errors'].append("Auto-discovery failed")
+                if self.email_enabled:
+                    self.send_email_notification(success=False)
+                return False
+            
+            # Create destination workspace structure
+            if self.migration_mode:
+                workspace_mapping = self.create_destination_workspace_structure(complete_structure)
+                self.discovered_workspace_mapping = workspace_mapping
+            
+            # Convert auto-discovered structure to repository list for processing
+            repositories = self.flatten_discovered_structure_to_repositories(complete_structure)
+            workspace_repositories = complete_structure
+            total_repos = len(repositories)
+            
+        elif self.multi_workspace_mode:
+            # MANUAL MULTI-WORKSPACE MODE: Use configured workspace pairs
             workspace_repositories = self.get_all_workspaces_repositories()
-            total_repos = sum(ws_data['repo_count'] for ws_data in workspace_repositories.values())
+            repositories = self.flatten_workspace_repositories(workspace_repositories)
+            total_repos = len(repositories)
+            
         else:
+            # SINGLE WORKSPACE MODE: Use configured single workspace
             repositories = self.get_all_repositories()
             total_repos = len(repositories)
         
         if not repositories:
-            self.log("❌ No repositories found in source workspace")
+            self.log("❌ No repositories found to process")
             self.backup_stats['end_time'] = datetime.now()
-            self.backup_stats['errors'].append("No repositories found in source workspace")
+            self.backup_stats['errors'].append("No repositories found")
             if self.email_enabled:
                 self.send_email_notification(success=False)
             return False
