@@ -368,14 +368,88 @@ is_backup_due() {
     fi
 }
 
+# Check if Python script should be used instead of shell script
+should_use_python() {
+    # Check for enhanced features that require Python
+    if [[ "$AUTO_DISCOVER_ALL" == "true" ]] || \
+       [[ "$MIGRATION_MODE" == "true" ]] || \
+       [[ "$RESTORE_ISSUES" == "true" ]] || \
+       [[ "$RESTORE_WIKI" == "true" ]] || \
+       [[ "$RESTORE_PRS" == "true" ]] || \
+       [[ -n "$SOURCE_ATLASSIAN_EMAIL" && -n "$DEST_ATLASSIAN_EMAIL" ]]; then
+        return 0  # True - use Python
+    else
+        return 1  # False - use shell script
+    fi
+}
+
+# Run Python script with proper environment
+run_python_script() {
+    local python_script=""
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Look for Python script in multiple locations
+    if [[ -f "$script_dir/bitbucket-backup.py" ]]; then
+        python_script="$script_dir/bitbucket-backup.py"
+    elif [[ -f "$BACKUP_BASE_DIR/bitbucket-backup.py" ]]; then
+        python_script="$BACKUP_BASE_DIR/bitbucket-backup.py"
+    elif [[ -f "/opt/bitbucket-backup/bitbucket-backup.py" ]]; then
+        python_script="/opt/bitbucket-backup/bitbucket-backup.py"
+    else
+        log_error "Python script not found! Please ensure bitbucket-backup.py is available."
+        exit 1
+    fi
+    
+    log_info "🐍 Using Python script for enhanced features: $python_script"
+    
+    # Set up environment variables for Python script
+    export SOURCE_ATLASSIAN_EMAIL="${SOURCE_ATLASSIAN_EMAIL:-$ATLASSIAN_EMAIL}"
+    export SOURCE_BITBUCKET_API_TOKEN="${SOURCE_BITBUCKET_API_TOKEN:-$BITBUCKET_API_TOKEN}"
+    export SOURCE_BITBUCKET_USERNAME="${SOURCE_BITBUCKET_USERNAME:-$BITBUCKET_USERNAME}"
+    export SOURCE_BITBUCKET_WORKSPACE="${SOURCE_BITBUCKET_WORKSPACE:-$BITBUCKET_WORKSPACE}"
+    export SOURCE_BITBUCKET_WORKSPACES="${SOURCE_BITBUCKET_WORKSPACES:-}"
+    
+    # Legacy compatibility for Python script
+    export ATLASSIAN_EMAIL="${SOURCE_ATLASSIAN_EMAIL:-$ATLASSIAN_EMAIL}"
+    export BITBUCKET_API_TOKEN="${SOURCE_BITBUCKET_API_TOKEN:-$BITBUCKET_API_TOKEN}"
+    export BITBUCKET_USERNAME="${SOURCE_BITBUCKET_USERNAME:-$BITBUCKET_USERNAME}"
+    export BITBUCKET_WORKSPACE="${SOURCE_BITBUCKET_WORKSPACE:-$BITBUCKET_WORKSPACE}"
+    export BACKUP_WORKSPACE="${DEST_BITBUCKET_WORKSPACE:-$BACKUP_WORKSPACE}"
+    
+    # Change to the directory containing the Python script
+    cd "$(dirname "$python_script")"
+    
+    # Run Python script with the passed arguments
+    case "${1:-}" in
+        --test-only)
+            log_info "🧪 Running Python configuration test..."
+            python3 "$(basename "$python_script")" test
+            ;;
+        *)
+            log_info "🚀 Running Python backup/migration..."
+            python3 "$(basename "$python_script")"
+            ;;
+    esac
+}
+
 # Main function
 main() {
     # Initialize configuration (loads .env file automatically)
     init_config
     
+    # Check if we should use Python script for enhanced features
+    if should_use_python; then
+        log_info "🔥 Enhanced features detected - delegating to Python script"
+        run_python_script "$@"
+        exit $?
+    fi
+    
+    # Continue with shell script for basic functionality
+    log_info "📜 Using shell script for basic backup functionality"
+    
     # Handle command line arguments
     case "${1:-}" in
-        --test-only)
+        --test-only|--test)
             log_info "🧪 Running connection test only..."
             check_dependencies
             validate_config
@@ -401,11 +475,13 @@ main() {
             echo "  --help, -h     Show this help message"
             echo ""
             echo "Configuration file: /opt/bitbucket-backup/config/.env"
-            echo "Required variables:"
-            echo "  ATLASSIAN_EMAIL      - Your Atlassian account email"
-            echo "  BITBUCKET_API_TOKEN  - Your Bitbucket API token"
-            echo "  BITBUCKET_WORKSPACE  - Source workspace name"
-            echo "  BACKUP_WORKSPACE     - Backup workspace name"
+            echo ""
+            echo "🐍 For enhanced features, the script automatically uses Python version:"
+            echo "  • Auto-discovery of ALL workspaces"
+            echo "  • Cross-account migration"
+            echo "  • Collaboration data restoration"
+            echo ""
+            echo "Shell script supports basic single-workspace backup only."
             exit 0
             ;;
         "")
