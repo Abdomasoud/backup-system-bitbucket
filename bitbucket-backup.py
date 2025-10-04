@@ -265,7 +265,7 @@ class BitbucketMigrationSystem:
         return all_data
     
     def validate_migration_config(self):
-        """Validate migration configuration"""
+        """Validate migration configuration and test API connections"""
         if not self.migration_mode:
             # Standard backup mode - only need source credentials
             missing = []
@@ -279,7 +279,15 @@ class BitbucketMigrationSystem:
             if missing:
                 self.log(f"❌ Missing source configuration: {', '.join(missing)}")
                 return False
-            return True
+            
+            # Test source API connection for backup mode
+            self.log("🔍 Testing source API connection...")
+            return self._test_api_connection(
+                email=self.source_email,
+                api_token=self.source_api_token,
+                workspace=self.source_workspace,
+                account_type="SOURCE"
+            )
         
         # Migration mode - need both source and destination credentials
         missing = []
@@ -304,9 +312,127 @@ class BitbucketMigrationSystem:
             self.log(f"❌ Missing migration configuration: {', '.join(missing)}")
             self.log("💡 For migration mode, you need both SOURCE_ and DEST_ credentials")
             return False
+
+        # Test API connections with detailed error reporting
+        self.log("🔍 Testing API connections...")
+        
+        # Test source API connection
+        source_valid = self._test_api_connection(
+            email=self.source_email,
+            api_token=self.source_api_token,
+            workspace=self.source_workspace,
+            account_type="SOURCE"
+        )
+        
+        # Test destination API connection
+        dest_valid = self._test_api_connection(
+            email=self.dest_email,
+            api_token=self.dest_api_token,
+            workspace=self.dest_workspace,
+            account_type="DESTINATION"
+        )
+        
+        if not source_valid or not dest_valid:
+            return False
             
-        self.log("✅ Migration configuration validated")
+        self.log("✅ Migration configuration and API connections validated")
         return True
+    
+    def _test_api_connection(self, email, api_token, workspace, account_type):
+        """Test API connection with detailed error reporting"""
+        self.log(f"   Testing {account_type} account connection...")
+        
+        try:
+            # Test basic authentication
+            response = requests.get(
+                'https://api.bitbucket.org/2.0/user',
+                auth=(email, api_token),
+                timeout=30
+            )
+            
+            if response.status_code == 401:
+                self.log(f"❌ {account_type} Authentication Failed:")
+                self.log(f"   • Email: {email}")
+                self.log(f"   • API Token: {'*' * 8}...{api_token[-4:] if len(api_token) > 4 else '****'}")
+                self.log(f"   • Error: Invalid credentials or API token")
+                self.log(f"   • Fix: Check your Atlassian email and API token")
+                self.log(f"   • Generate new token at: https://bitbucket.org/account/settings/app-passwords/")
+                return False
+                
+            elif response.status_code == 403:
+                self.log(f"❌ {account_type} Permission Denied:")
+                self.log(f"   • Account: {email}")
+                self.log(f"   • Error: API token lacks required permissions")
+                self.log(f"   • Required permissions: Account: Read, Repositories: Read/Write")
+                self.log(f"   • Fix: Create new API token with proper permissions")
+                return False
+                
+            elif response.status_code != 200:
+                self.log(f"❌ {account_type} API Error:")
+                self.log(f"   • Status: {response.status_code}")
+                self.log(f"   • Response: {response.text[:200]}...")
+                return False
+            
+            # Test workspace access
+            workspace_response = requests.get(
+                f'https://api.bitbucket.org/2.0/workspaces/{workspace}',
+                auth=(email, api_token),
+                timeout=30
+            )
+            
+            if workspace_response.status_code == 404:
+                self.log(f"❌ {account_type} Workspace Access Error:")
+                self.log(f"   • Workspace: {workspace}")
+                self.log(f"   • Error: Workspace not found or no access")
+                self.log(f"   • Fix: Check workspace name and verify account has access")
+                return False
+                
+            elif workspace_response.status_code != 200:
+                self.log(f"❌ {account_type} Workspace Error:")
+                self.log(f"   • Workspace: {workspace}")
+                self.log(f"   • Status: {workspace_response.status_code}")
+                self.log(f"   • Response: {workspace_response.text[:200]}...")
+                return False
+            
+            # Test repository listing permissions
+            repos_response = requests.get(
+                f'https://api.bitbucket.org/2.0/repositories/{workspace}',
+                auth=(email, api_token),
+                timeout=30
+            )
+            
+            if repos_response.status_code == 403:
+                self.log(f"❌ {account_type} Repository Access Error:")
+                self.log(f"   • Workspace: {workspace}")
+                self.log(f"   • Error: No permission to list repositories")
+                self.log(f"   • Fix: API token needs 'Repositories: Read' permission")
+                return False
+                
+            elif repos_response.status_code != 200:
+                self.log(f"⚠️  {account_type} Repository Listing Warning:")
+                self.log(f"   • Status: {repos_response.status_code}")
+                self.log(f"   • Note: May affect repository discovery")
+            
+            self.log(f"   ✅ {account_type} account connection successful")
+            return True
+            
+        except requests.exceptions.Timeout:
+            self.log(f"❌ {account_type} Connection Timeout:")
+            self.log(f"   • Error: Request timed out after 30 seconds")
+            self.log(f"   • Fix: Check internet connection and try again")
+            return False
+            
+        except requests.exceptions.ConnectionError:
+            self.log(f"❌ {account_type} Connection Error:")
+            self.log(f"   • Error: Cannot connect to Bitbucket API")
+            self.log(f"   • Fix: Check internet connection and firewall settings")
+            return False
+            
+        except Exception as e:
+            self.log(f"❌ {account_type} Unexpected Error:")
+            self.log(f"   • Error: {str(e)}")
+            self.log(f"   • Fix: Check configuration and try again")
+            return False
     
     def _parse_workspaces(self, workspaces_str):
         """Parse comma-separated workspace list"""
@@ -2189,6 +2315,18 @@ Generated by Bitbucket Backup System on {datetime.now().strftime('%Y-%m-%d %H:%M
         
         # Validate configuration
         if not self.validate_migration_config():
+            self.log("\n" + "="*60)
+            self.log("❌ CONFIGURATION VALIDATION FAILED")
+            self.log("="*60)
+            self.log("🔧 TROUBLESHOOTING GUIDE:")
+            self.log("   1. Check your .env file configuration")
+            self.log("   2. Verify API tokens have correct permissions:")
+            self.log("      • Account: Read")
+            self.log("      • Repositories: Read (Source) / Write (Destination)")
+            self.log("   3. Confirm workspace names are correct")
+            self.log("   4. Test API tokens at: https://bitbucket.org/account/settings/app-passwords/")
+            self.log("   5. Ensure you have access to specified workspaces")
+            self.log("="*60)
             return False
         
         # Determine repository discovery method
@@ -2437,5 +2575,42 @@ Examples:
     success = backup_system.backup_all_repositories()
     sys.exit(0 if success else 1)
 
+def test_configuration():
+    """Test API configuration and connections without running backup/migration"""
+    print("🧪 BITBUCKET CONFIGURATION TEST")
+    print("="*50)
+    
+    backup_system = BitbucketMigrationSystem()
+    
+    # Test basic configuration loading
+    print("📋 Configuration loaded:")
+    print(f"   • Migration Mode: {'Yes' if backup_system.migration_mode else 'No'}")
+    print(f"   • Auto-Discovery: {'Yes' if backup_system.auto_discover_all else 'No'}")
+    print(f"   • Source Email: {backup_system.source_email or 'NOT SET'}")
+    print(f"   • Source Workspace: {backup_system.source_workspace or 'NOT SET'}")
+    if backup_system.migration_mode:
+        print(f"   • Dest Email: {backup_system.dest_email or 'NOT SET'}")
+        print(f"   • Dest Workspace: {backup_system.dest_workspace or 'NOT SET'}")
+    
+    # Run validation tests
+    success = backup_system.validate_migration_config()
+    
+    print("\n" + "="*50)
+    if success:
+        print("✅ CONFIGURATION TEST PASSED")
+        print("🚀 Your configuration is ready for backup/migration!")
+    else:
+        print("❌ CONFIGURATION TEST FAILED")
+        print("🔧 Please fix the issues above before proceeding")
+    
+    return success
+
 if __name__ == '__main__':
-    main()
+    import sys
+    
+    # Check if test mode is requested
+    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+        success = test_configuration()
+        sys.exit(0 if success else 1)
+    else:
+        main()
