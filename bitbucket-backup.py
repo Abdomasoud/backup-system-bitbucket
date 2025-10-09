@@ -1085,6 +1085,52 @@ class BitbucketMigrationSystem:
             self.log(f"Error fetching deploy keys for {repo_name}: {e}")
             metadata['deploy_keys'] = []
         
+        # Create PR documentation during backup for local storage
+        if metadata.get('pull_requests'):
+            try:
+                pr_documentation = self.generate_pr_documentation(metadata['pull_requests'])
+                pr_doc_path = os.path.join(repo_metadata_dir, 'pr_documentation.md')
+                
+                with open(pr_doc_path, 'w', encoding='utf-8') as f:
+                    f.write(pr_documentation)
+                
+                self.log(f"  💾 Created PR documentation: {len(metadata['pull_requests'])} PRs documented")
+            except Exception as e:
+                self.log(f"  ⚠️ Could not create PR documentation during backup: {e}")
+        
+        # Create wiki documentation summary during backup
+        if metadata.get('wiki') and metadata['wiki'].get('pages'):
+            try:
+                wiki_summary_path = os.path.join(repo_metadata_dir, 'wiki_summary.md')
+                wiki_pages = metadata['wiki']['pages']
+                
+                wiki_summary = f"""# Wiki Pages Summary
+
+**Repository:** {repo_name}
+**Backup Date:** {self.timestamp}
+**Total Pages:** {len(wiki_pages)}
+
+---
+
+"""
+                for page in wiki_pages:
+                    wiki_summary += f"""## {page.get('title', 'Untitled')}
+- **Slug:** `{page.get('slug', 'unknown')}`
+- **Created:** {page.get('created_on', 'Unknown')}
+- **Updated:** {page.get('updated_on', 'Unknown')}
+- **Author:** {page.get('author', {}).get('display_name', 'Unknown')}
+
+---
+
+"""
+                
+                with open(wiki_summary_path, 'w', encoding='utf-8') as f:
+                    f.write(wiki_summary)
+                
+                self.log(f"  📖 Created wiki summary: {len(wiki_pages)} pages documented")
+            except Exception as e:
+                self.log(f"  ⚠️ Could not create wiki summary during backup: {e}")
+        
         # Save metadata to JSON file
         metadata_file = os.path.join(repo_metadata_dir, 'metadata.json')
         with open(metadata_file, 'w', encoding='utf-8') as f:
@@ -1125,46 +1171,124 @@ class BitbucketMigrationSystem:
         return permissions_data
     
     def fetch_repository_wiki(self, repo_name, workspace=None):
-        """Fetch repository wiki content"""
+        """Fetch repository wiki content with comprehensive backup"""
         workspace = workspace or self.source_workspace or 'unknown'
+        
         try:
             # Check if wiki exists and is enabled
+            self.log(f"📖 Checking wiki status for {workspace}/{repo_name}...")
             wiki_info = self.make_api_request(f'repositories/{workspace}/{repo_name}')
             
             if not wiki_info or not wiki_info.get('has_wiki', False):
+                self.log(f"   ℹ️ No wiki found or wiki disabled for {repo_name}")
                 return None
+            
+            self.log(f"   ✅ Wiki detected for {repo_name}, fetching content...")
             
             wiki_data = {
                 'enabled': True,
                 'pages': [],
-                'wiki_info': {}
+                'wiki_info': {
+                    'repository': repo_name,
+                    'workspace': workspace,
+                    'backup_timestamp': datetime.now().isoformat(),
+                    'total_pages': 0
+                },
+                'backup_method': 'api'
             }
             
-            # Try to get wiki pages (this endpoint might not be available for all repos)
+            # Create local wiki backup directory
+            wiki_backup_dir = os.path.join(self.metadata_dir, repo_name, self.timestamp, 'wiki_pages')
+            os.makedirs(wiki_backup_dir, exist_ok=True)
+            
+            # Try to get wiki pages using multiple methods
+            pages_fetched = 0
+            
+            # Method 1: Try standard wiki API
             try:
-                wiki_pages = self.fetch_paginated_data(f'repositories/{workspace}/{repo_name}/wiki')
+                self.log(f"   🔍 Fetching wiki pages via API...")
+                wiki_pages = self.fetch_paginated_data_with_auth(
+                    f'repositories/{workspace}/{repo_name}/wiki',
+                    auth=self.source_auth
+                )
                 
                 for page in wiki_pages:
-                    page_data = {
-                        'title': page.get('title', ''),
-                        'slug': page.get('slug', ''),
-                        'content': page.get('content', ''),
-                        'created_on': page.get('created_on', ''),
-                        'updated_on': page.get('updated_on', ''),
-                        'author': page.get('author', {})
-                    }
-                    wiki_data['pages'].append(page_data)
+                    try:
+                        # Get detailed page content
+                        page_slug = page.get('slug', page.get('title', 'unknown-page'))
+                        page_detail = self.make_api_request(
+                            f'repositories/{workspace}/{repo_name}/wiki/{page_slug}'
+                        )
+                        
+                        if page_detail:
+                            page_data = {
+                                'title': page_detail.get('title', page.get('title', '')),
+                                'slug': page_detail.get('slug', page_slug),
+                                'content': page_detail.get('content', ''),
+                                'raw_content': page_detail.get('content', {}).get('raw', '') if isinstance(page_detail.get('content'), dict) else str(page_detail.get('content', '')),
+                                'created_on': page_detail.get('created_on', page.get('created_on', '')),
+                                'updated_on': page_detail.get('updated_on', page.get('updated_on', '')),
+                                'author': page_detail.get('author', page.get('author', {})),
+                                'version': page_detail.get('version', 1)
+                            }
+                        else:
+                            # Fallback to basic page info
+                            page_data = {
+                                'title': page.get('title', ''),
+                                'slug': page_slug,
+                                'content': page.get('content', ''),
+                                'raw_content': str(page.get('content', '')),
+                                'created_on': page.get('created_on', ''),
+                                'updated_on': page.get('updated_on', ''),
+                                'author': page.get('author', {}),
+                                'version': 1
+                            }
+                        
+                        wiki_data['pages'].append(page_data)
+                        pages_fetched += 1
+                        
+                        # Save individual page to local backup
+                        page_filename = f"{page_slug.replace('/', '_')}.md"
+                        page_filepath = os.path.join(wiki_backup_dir, page_filename)
+                        
+                        with open(page_filepath, 'w', encoding='utf-8') as f:
+                            f.write(f"# {page_data.get('title', 'Untitled')}\n\n")
+                            f.write(f"**Created:** {page_data.get('created_on', 'Unknown')}\n")
+                            f.write(f"**Updated:** {page_data.get('updated_on', 'Unknown')}\n")
+                            f.write(f"**Author:** {page_data.get('author', {}).get('display_name', 'Unknown')}\n\n")
+                            f.write("---\n\n")
+                            f.write(page_data.get('raw_content', page_data.get('content', '')))
+                        
+                        self.log(f"   📄 Backed up wiki page: {page_data.get('title', 'Untitled')}")
+                        
+                    except Exception as page_error:
+                        self.log(f"   ⚠️ Error backing up wiki page '{page.get('title', 'Unknown')}': {page_error}")
+                        continue
                     
             except Exception as e:
-                # Wiki API might not be accessible or wiki might be empty
-                self.log(f"Wiki exists but content not accessible via API: {e}")
-                wiki_data['pages'] = []
-                wiki_data['note'] = 'Wiki exists but content not accessible via API'
+                self.log(f"   ⚠️ Wiki API access failed: {e}")
+                wiki_data['backup_method'] = 'limited'
+                wiki_data['api_error'] = str(e)
             
-            return wiki_data
+            # Update wiki info
+            wiki_data['wiki_info']['total_pages'] = pages_fetched
+            wiki_data['wiki_info']['backup_directory'] = wiki_backup_dir
+            
+            if pages_fetched > 0:
+                self.log(f"   ✅ Successfully backed up {pages_fetched} wiki pages for {repo_name}")
+                
+                # Create summary file
+                summary_file = os.path.join(wiki_backup_dir, '_wiki_summary.json')
+                with open(summary_file, 'w', encoding='utf-8') as f:
+                    json.dump(wiki_data, f, indent=2, default=str)
+                    
+                return wiki_data
+            else:
+                self.log(f"   ℹ️ No wiki pages found for {repo_name} (wiki exists but empty)")
+                return None
             
         except Exception as e:
-            self.log(f"Error checking wiki status: {e}")
+            self.log(f"   ❌ Error checking wiki status for {repo_name}: {e}")
             return None
     
     def fetch_repository_settings(self, repo_name, workspace=None):
@@ -1402,7 +1526,9 @@ class BitbucketMigrationSystem:
                 self.log(f"⏭️  Skipping {target_name} - already exists in destination")
                 return existing_dest_repos[target_name]
             else:
-                self.log(f"⚠️  Repository {target_name} already exists but SKIP_EXISTING_REPOS=false")
+                self.log(f"🔄 Repository {target_name} already exists - will update content (SKIP_EXISTING_REPOS=false)")
+                # Return the existing repository info to continue with content update
+                return existing_dest_repos[target_name]
         
         # Copy repository settings from source - handle both string and dict formats
         workspace_info = repo.get('workspace', {})
@@ -1690,15 +1816,34 @@ class BitbucketMigrationSystem:
         # but we can create comprehensive documentation
         
         try:
-            # Create a PR documentation wiki page or issue
+            # Generate comprehensive PR documentation
             pr_documentation = self.generate_pr_documentation(prs_data)
+            
+            # Save PR documentation to local backup for archive
+            try:
+                pr_doc_dir = os.path.join(self.metadata_dir, repo_name, self.timestamp)
+                os.makedirs(pr_doc_dir, exist_ok=True)
+                pr_doc_path = os.path.join(pr_doc_dir, 'pr_documentation.md')
+                
+                with open(pr_doc_path, 'w', encoding='utf-8') as f:
+                    f.write(pr_documentation)
+                
+                self.log(f"   💾 Saved PR documentation to local backup: {pr_doc_path}")
+            except Exception as e:
+                self.log(f"   ⚠️ Could not save PR documentation locally: {e}")
             
             # Create as wiki page if possible, otherwise as an issue
             wiki_created = self.create_pr_documentation_wiki(repo_name, pr_documentation)
             
             if not wiki_created:
                 # Create as an issue for documentation
-                self.create_pr_documentation_issue(repo_name, pr_documentation)
+                issue_created = self.create_pr_documentation_issue(repo_name, pr_documentation)
+                if issue_created:
+                    self.log(f"   📋 Created PR documentation as issue in {repo_name}")
+                else:
+                    self.log(f"   ⚠️ Could not create PR documentation in destination repository")
+            else:
+                self.log(f"   📖 Created PR documentation as wiki page in {repo_name}")
             
             return len(prs_data)
             
@@ -1707,48 +1852,84 @@ class BitbucketMigrationSystem:
             return 0
     
     def restore_wiki(self, repo_name, wiki_data):
-        """Restore wiki pages to destination repository"""
+        """Restore wiki pages to destination repository with comprehensive error handling"""
         if not wiki_data or not wiki_data.get('pages'):
+            self.log(f"   ℹ️ No wiki data found for {repo_name}")
             return 0
             
-        self.log(f"📖 Restoring {len(wiki_data['pages'])} wiki pages to {repo_name}...")
+        total_pages = len(wiki_data['pages'])
+        self.log(f"📖 Restoring {total_pages} wiki pages to {repo_name}...")
+        
         restored_count = 0
+        failed_count = 0
         
         # First, enable wiki if not enabled
         try:
             self.enable_repository_wiki(repo_name)
+            self.log(f"   ✅ Wiki enabled for {repo_name}")
         except Exception as e:
-            self.log(f"⚠️ Could not enable wiki: {e}")
+            self.log(f"   ⚠️ Could not enable wiki for {repo_name}: {e}")
+            self.log(f"   ℹ️ Continuing with restoration attempt...")
         
-        for page in wiki_data['pages']:
+        # Process each wiki page
+        for i, page in enumerate(wiki_data['pages'], 1):
             try:
+                page_title = page.get('title', f'Migrated Page {i}')
+                page_slug = page.get('slug', page_title.lower().replace(' ', '-'))
+                
+                self.log(f"   📄 [{i}/{total_pages}] Restoring wiki page: {page_title}")
+                
+                # Prepare page content with migration header
+                original_content = page.get('raw_content') or page.get('content', '')
+                if isinstance(original_content, dict):
+                    original_content = original_content.get('raw', str(original_content))
+                
+                migrated_content = self.format_migrated_content(
+                    original_content,
+                    'wiki',
+                    page.get('author', {}),
+                    page.get('updated_on')
+                )
+                
                 page_data = {
-                    'title': page.get('title', 'Migrated Page'),
+                    'title': page_title,
                     'content': {
-                        'raw': self.format_migrated_content(
-                            page.get('content', ''),
-                            'wiki',
-                            page.get('author', {}),
-                            page.get('updated_on')
-                        )
+                        'raw': migrated_content
                     }
                 }
                 
-                # Create wiki page
+                # Attempt to create/update wiki page
                 response = self.make_api_request(
-                    f'repositories/{self.dest_workspace}/{repo_name}/wiki/{page.get("slug", page.get("title", "migrated-page"))}',
+                    f'repositories/{self.dest_workspace}/{repo_name}/wiki/{page_slug}',
                     method='PUT',
-                    data=page_data
+                    data=page_data,
+                    auth=self.dest_auth
                 )
                 
                 if response:
-                    self.log(f"   📄 Restored wiki page: {page.get('title', 'Untitled')}")
+                    self.log(f"     ✅ Successfully restored: {page_title}")
                     restored_count += 1
                 else:
-                    self.log(f"   ❌ Failed to restore wiki page: {page.get('title', 'Untitled')}")
+                    self.log(f"     ❌ Failed to restore: {page_title} (API returned no response)")
+                    failed_count += 1
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.5)
                     
             except Exception as e:
-                self.log(f"   ❌ Error restoring wiki page '{page.get('title', 'Unknown')}': {e}")
+                page_title = page.get('title', f'Page {i}')
+                self.log(f"     ❌ Error restoring wiki page '{page_title}': {e}")
+                failed_count += 1
+                continue
+        
+        # Summary
+        if restored_count > 0:
+            self.log(f"   ✅ Wiki restoration complete for {repo_name}: {restored_count}/{total_pages} pages restored")
+        else:
+            self.log(f"   ⚠️ No wiki pages were successfully restored for {repo_name}")
+            
+        if failed_count > 0:
+            self.log(f"   ⚠️ {failed_count} wiki pages failed to restore for {repo_name}")
         
         return restored_count
     
@@ -1907,44 +2088,123 @@ class BitbucketMigrationSystem:
         return None
     
     def generate_pr_documentation(self, prs_data):
-        """Generate comprehensive PR documentation"""
-        doc_content = f"""# Pull Requests Documentation
+        """Generate comprehensive PR documentation with full details"""
+        migration_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        doc_content = f"""# 🔀 Pull Requests Documentation
 
-**Repository migrated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-**Total PRs:** {len(prs_data)}
+**📅 Repository migrated on:** {migration_date}
+**📊 Total PRs:** {len(prs_data)}
+
+> This document contains all pull request information from the source repository.
+> PRs cannot be recreated in backup repositories, but all metadata is preserved here.
 
 ---
 
 """
         
+        # Group PRs by state for better organization
+        pr_by_state = {'OPEN': [], 'MERGED': [], 'DECLINED': [], 'SUPERSEDED': []}
         for pr in prs_data:
-            doc_content += f"""
-## PR #{pr.get('id', 'Unknown')} - {pr.get('title', 'Untitled')}
-
-- **Author:** {pr.get('author', {}).get('display_name', 'Unknown')}
-- **State:** {pr.get('state', 'Unknown')}
-- **Created:** {pr.get('created_on', 'Unknown')}
-- **Updated:** {pr.get('updated_on', 'Unknown')}
-- **Source Branch:** {pr.get('source', {}).get('branch', {}).get('name', 'Unknown')}
-- **Destination Branch:** {pr.get('destination', {}).get('branch', {}).get('name', 'Unknown')}
-
-### Description
-{pr.get('description', 'No description provided')}
-
-### Comments
-"""
-            
-            if pr.get('comments'):
-                for comment in pr['comments']:
-                    doc_content += f"""
-**{comment.get('user', {}).get('display_name', 'Unknown')}** - {comment.get('created_on', '')}
-{comment.get('content', {}).get('raw', '')}
-
-"""
-            else:
-                doc_content += "No comments\n"
+            state = pr.get('state', 'UNKNOWN').upper()
+            if state not in pr_by_state:
+                pr_by_state[state] = []
+            pr_by_state[state].append(pr)
+        
+        # Generate summary statistics
+        doc_content += "## 📈 Summary Statistics\n\n"
+        for state, prs in pr_by_state.items():
+            if prs:
+                doc_content += f"- **{state}:** {len(prs)} PRs\n"
+        doc_content += "\n---\n\n"
+        
+        # Generate detailed PR information
+        for state, prs in pr_by_state.items():
+            if not prs:
+                continue
                 
-            doc_content += "\n---\n"
+            state_emoji = {
+                'OPEN': '🟢',
+                'MERGED': '🟣', 
+                'DECLINED': '🔴',
+                'SUPERSEDED': '🟡'
+            }.get(state, '⚪')
+            
+            doc_content += f"## {state_emoji} {state} Pull Requests ({len(prs)})\n\n"
+            
+            for pr in prs:
+                # Basic PR information
+                doc_content += f"""### PR #{pr.get('id', 'Unknown')} - {pr.get('title', 'Untitled')}
+
+**📋 Details:**
+- **👤 Author:** {pr.get('author', {}).get('display_name', 'Unknown')} (@{pr.get('author', {}).get('username', 'unknown')})
+- **📊 State:** {pr.get('state', 'Unknown')}
+- **📅 Created:** {pr.get('created_on', 'Unknown')}
+- **📅 Updated:** {pr.get('updated_on', 'Unknown')}
+- **🌿 Source Branch:** `{pr.get('source', {}).get('branch', {}).get('name', 'Unknown')}`
+- **🎯 Destination Branch:** `{pr.get('destination', {}).get('branch', {}).get('name', 'Unknown')}`
+"""
+                
+                # Add reviewers if available
+                if pr.get('reviewers'):
+                    doc_content += "- **👥 Reviewers:** "
+                    reviewers = [f"{r.get('display_name', 'Unknown')} (@{r.get('username', 'unknown')})" 
+                               for r in pr.get('reviewers', [])]
+                    doc_content += ", ".join(reviewers) + "\n"
+                
+                # Add merge commit if available
+                if pr.get('merge_commit'):
+                    doc_content += f"- **🔗 Merge Commit:** `{pr.get('merge_commit', {}).get('hash', 'Unknown')}`\n"
+                
+                # Add close reason for declined PRs
+                if pr.get('state') == 'DECLINED' and pr.get('reason'):
+                    doc_content += f"- **❌ Decline Reason:** {pr.get('reason')}\n"
+                
+                doc_content += "\n**📝 Description:**\n"
+                description = pr.get('description', 'No description provided')
+                if description.strip():
+                    doc_content += f"> {description.replace(chr(10), chr(10)+'> ')}\n\n"
+                else:
+                    doc_content += "> *No description provided*\n\n"
+                
+                # Add commits if available
+                if pr.get('commits'):
+                    doc_content += "**📝 Commits:**\n"
+                    for commit in pr.get('commits', [])[:10]:  # Show up to 10 commits
+                        commit_hash = commit.get('hash', 'Unknown')[:8]
+                        commit_msg = commit.get('message', 'No message').split('\n')[0][:80]
+                        commit_author = commit.get('author', {}).get('user', {}).get('display_name', 'Unknown')
+                        doc_content += f"- `{commit_hash}` {commit_msg} - *{commit_author}*\n"
+                    if len(pr.get('commits', [])) > 10:
+                        doc_content += f"- *(... and {len(pr.get('commits', [])) - 10} more commits)*\n"
+                    doc_content += "\n"
+                
+                # Add comments
+                doc_content += "**💬 Comments:**\n"
+                if pr.get('comments'):
+                    for i, comment in enumerate(pr.get('comments', []), 1):
+                        comment_author = comment.get('user', {}).get('display_name', 'Unknown')
+                        comment_username = comment.get('user', {}).get('username', 'unknown')
+                        comment_date = comment.get('created_on', 'Unknown')
+                        comment_content = comment.get('content', {}).get('raw', 'No content')
+                        
+                        doc_content += f"""\n**Comment #{i} by {comment_author} (@{comment_username})** - *{comment_date}*
+> {comment_content.replace(chr(10), chr(10)+'> ')}
+"""
+                else:
+                    doc_content += "\n*No comments*\n"
+                    
+                doc_content += "\n" + "="*80 + "\n\n"
+        
+        # Add footer with migration information
+        doc_content += f"""\n---\n\n**📝 Migration Notes:**
+- This documentation was automatically generated during repository migration
+- Original pull requests cannot be recreated due to Bitbucket limitations
+- All PR metadata, comments, and commit information has been preserved
+- For questions about specific PRs, refer to the original repository or contact the PR authors
+
+*Generated on {migration_date} by Bitbucket Migration System*
+"""
         
         return doc_content
     
@@ -2099,12 +2359,42 @@ class BitbucketMigrationSystem:
                 # Add repository files with clear naming
                 if os.path.exists(repo_path):
                     tar.add(repo_path, arcname=f"repository-{repo_name}")
+                    self.log(f"   📁 Added repository files to backup")
                 
                 # Add metadata file with clear naming
                 if os.path.exists(metadata_path):
                     tar.add(metadata_path, arcname=f"metadata-{repo_name}.json")
+                    self.log(f"   📋 Added metadata file to backup")
                 
-                # Create a backup info file for easy identification
+                # Add wiki backup files if they exist
+                wiki_backup_dir = os.path.join(self.metadata_dir, repo_name, self.timestamp, 'wiki_pages')
+                if os.path.exists(wiki_backup_dir) and os.listdir(wiki_backup_dir):
+                    tar.add(wiki_backup_dir, arcname=f"wiki-backup-{repo_name}")
+                    wiki_count = len([f for f in os.listdir(wiki_backup_dir) if f.endswith('.md')])
+                    self.log(f"   📖 Added wiki backup ({wiki_count} pages) to archive")
+                
+                # Check for and add PR documentation if it exists (from backup or restoration)
+                pr_doc_paths = [
+                    os.path.join(self.metadata_dir, repo_name, self.timestamp, 'pr_documentation.md'),  # From restoration
+                    os.path.join(os.path.dirname(metadata_path), 'pr_documentation.md') if metadata_path else None  # From backup
+                ]
+                
+                pr_doc_added = False
+                for pr_doc_path in pr_doc_paths:
+                    if pr_doc_path and os.path.exists(pr_doc_path):
+                        tar.add(pr_doc_path, arcname=f"pr-documentation-{repo_name}.md")
+                        self.log(f"   🔀 Added PR documentation to backup")
+                        pr_doc_added = True
+                        break
+                
+                # Check for and add wiki summary if it exists  
+                if metadata_path:
+                    wiki_summary_path = os.path.join(os.path.dirname(metadata_path), 'wiki_summary.md')
+                    if os.path.exists(wiki_summary_path):
+                        tar.add(wiki_summary_path, arcname=f"wiki-summary-{repo_name}.md")
+                        self.log(f"   📖 Added wiki summary to backup")
+                
+                # Create a comprehensive backup info file
                 backup_info = {
                     "backup_created": current_time.isoformat(),
                     "repository_name": repo_name,
@@ -2112,19 +2402,38 @@ class BitbucketMigrationSystem:
                     "metadata_items": metadata_count,
                     "repository_size_mb": repo_size_mb,
                     "backup_filename": backup_filename,
-                    "backup_system_version": "BitbucketMigrationSystem v1.0",
+                    "backup_system_version": "BitbucketMigrationSystem v1.2",
                     "migration_mode": getattr(self, 'migration_mode', False),
-                    "multi_workspace_mode": getattr(self, 'multi_workspace_mode', False)
+                    "multi_workspace_mode": getattr(self, 'multi_workspace_mode', False),
+                    "includes": {
+                        "repository_code": os.path.exists(repo_path) if repo_path else False,
+                        "metadata": os.path.exists(metadata_path) if metadata_path else False,
+                        "wiki_pages": os.path.exists(wiki_backup_dir) and bool(os.listdir(wiki_backup_dir)) if wiki_backup_dir else False,
+                        "pr_documentation": pr_doc_added,
+                        "wiki_summary": os.path.exists(os.path.join(os.path.dirname(metadata_path), 'wiki_summary.md')) if metadata_path else False
+                    },
+                    "backup_contents": {
+                        "description": "Complete Bitbucket repository backup with code, metadata, and documentation",
+                        "structure": {
+                            f"repository-{repo_name}/": "Complete git repository with all branches and history",
+                            f"metadata-{repo_name}.json": "Comprehensive metadata including PRs, issues, settings, etc.",
+                            f"wiki-backup-{repo_name}/": "Individual wiki pages as Markdown files (if wiki exists during restoration)",
+                            f"pr-documentation-{repo_name}.md": "Comprehensive PR documentation with all details (if PRs exist)",
+                            f"wiki-summary-{repo_name}.md": "Wiki pages summary and metadata (if wiki exists during backup)",
+                            "backup-info.json": "This metadata file describing the backup contents"
+                        }
+                    }
                 }
                 
                 # Write backup info to temp file and add to archive
                 import tempfile
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_info:
-                    json.dump(backup_info, temp_info, indent=2)
+                    json.dump(backup_info, temp_info, indent=2, default=str)
                     temp_info_path = temp_info.name
                 
                 tar.add(temp_info_path, arcname="backup-info.json")
                 os.unlink(temp_info_path)  # Clean up temp file
+                self.log(f"   ℹ️ Added backup information file")
             
             self.log(f"✅ Created comprehensive backup: {backup_filepath}")
             return backup_filepath
